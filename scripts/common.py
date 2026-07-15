@@ -32,4 +32,6 @@ def resolve_dtype(device: str) -> torch.dtype:
 
 def model_id(kind: str, size: str) -> str:
     """kind: 'CustomVoice' | 'VoiceDesign' | 'Base'"""
+    if kind == "VoiceDesign" and size != "1.7B":
+        raise ValueError("VoiceDesign is only published as 1.7B on Hugging Face (no 0.6B checkpoint)")
     return f"Qwen/Qwen3-TTS-12Hz-{size}-{kind}"

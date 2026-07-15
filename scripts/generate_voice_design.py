@@ -36,6 +36,8 @@ def main() -> None:
     parser.add_argument("--out", default="output/voice_design.wav")
     add_common_args(parser)
     args = parser.parse_args()
+    # VoiceDesign only ships as 1.7B on Hugging Face; no 0.6B checkpoint exists.
+    args.model_size = "1.7B"
 
     model = Qwen3TTSModel.from_pretrained(
         model_id("VoiceDesign", args.model_size),
