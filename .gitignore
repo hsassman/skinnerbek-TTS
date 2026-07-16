@@ -1,7 +1,16 @@
 .venv/
 __pycache__/
 *.pyc
-output/*.wav
+
+# Generated audio
+output/*
 !output/.gitkeep
-samples/*.wav
+
+# Your reference recordings -- any format, keep them out of the repo
+samples/*
 !samples/.gitkeep
+
+# Saved voice prompts: derived from your reference clips, and they embed a
+# speaker fingerprint. Regenerate with `tts.py voices add` rather than commit.
+voices/*
+!voices/.gitkeep
