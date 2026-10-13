@@ -138,7 +138,7 @@ scripts/
   refclip.py             reference-clip quality report and clean-up
   mock_model.py          fast stand-in model for `app.py --mock` (UI development)
   ui/                    studio.css, studio.js, recorder.js: the web app's styles and browser code
-assets/                  logo, favicon, masthead banner, empty-state illustration
+assets/                  logo, favicon, masthead banner
 tests/                   pytest suite (91 tests, no model download needed)
 lexicon.txt              pronunciation overrides
 samples/quick_test.txt   short script for smoke-testing an install
@@ -550,9 +550,8 @@ refers to, with a preview first.
 file changes, so a saved rule applies to the next generation with no restart.
 
 **Design assets.** The logo is inline SVG (it animates, and stays crisp at any size), and
-`assets/favicon.svg` is its static copy. The masthead banner (`assets/banner.webp`) and the
-empty-library illustration (`assets/empty-voices.webp`) were generated for the project. The
-app picks them up when present and falls back to drawn SVG art otherwise. Styles and browser
+`assets/favicon.svg` is its static copy. The masthead banner (`assets/banner.webp`) was
+generated for the project; the app falls back to drawn SVG art without it. Styles and browser
 behaviour live in `scripts/ui/` (`studio.css`, `studio.js`, `recorder.js`) as ordinary files.
 
 `python app.py --low-memory` forces 0.6B to bfloat16 (it also auto-enables when RAM is tight);
