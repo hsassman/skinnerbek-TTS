@@ -1,0 +1,6 @@
+Thanks for listening to this quick test.
+
+The setup runs entirely on this machine, with no internet connection.
+It reads plain sentences best, so keep each line short and clear.
+
+Let me know how the voice sounds, and we can tune it from here.

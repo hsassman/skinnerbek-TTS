@@ -1,0 +1,20 @@
+# Pronunciation overrides for Qwen3-TTS.
+#
+# One rule per line:   pattern -> replacement
+# - Plain patterns match whole words, case-insensitively:   SQL -> sequel
+# - Wrap a pattern in slashes for a raw regex:              /\bkm\/h\b/ -> kilometres per hour
+# - Everything after a # is a comment. Blank lines are ignored.
+#
+# Rules are applied before numbers and abbreviations are expanded, so you can
+# rewrite something into a form the rest of the cleanup then handles.
+# Edit freely -- this file is read fresh each run. Disable it per-run with
+# `--no-lexicon` (CLI). Remove the examples below or keep them, your call.
+
+# --- examples (uncomment / edit to use) ---
+# SQL      -> sequel
+# nginx    -> engine ex
+# Qwen     -> chwen
+# Nguyen   -> win
+# GIF      -> jif
+# 2FA      -> two factor auth
+# /\bAI\b/ -> A.I.
