@@ -1,4 +1,4 @@
-"""One web app for every Qwen3-TTS capability on this machine.
+"""Skinnerbek Studio: one web app for every Qwen3-TTS capability on this machine.
 
 `launch_ui.py` runs the demo that ships with `qwen_tts`: one capability per
 process, a bilingual UI, no notion of a script or a saved-voice library. This
@@ -6,8 +6,8 @@ app is the friendlier front door:
 
     * Speak       -- pick a voice, type a script, watch it render line by line,
                      redo any line you don't like.
-    * Describe    -- invent a voice from a written description (VoiceDesign).
-    * Voices      -- turn a recording into a reusable named voice.
+    * Design      -- invent a voice from a written description (VoiceDesign).
+    * Voices      -- record or upload a clip, check its quality, keep it as a voice.
     * Recordings  -- play back and download anything generated earlier.
     * Settings    -- machine report, pronunciation lexicon, housekeeping.
 
@@ -19,6 +19,9 @@ Every generation runs through the *same* helpers the command line uses
     python scripts/app.py                # http://127.0.0.1:7860
     python scripts/app.py --offline      # skip Hugging Face network checks
     python scripts/app.py --port 8000 --share
+    python scripts/app.py --mock         # fast stand-in model, for UI work
+
+Styles and browser code live in ui/ (studio.css, studio.js, recorder.js).
 
 One model fits in RAM at a time on an 8 GB box, so switching voice type or model
 size swaps the loaded model. The first generation of each kind loads the
@@ -45,6 +48,7 @@ import soundfile as sf  # noqa: E402
 from common import (  # noqa: E402
     DEFAULT_LUFS,
     OUTPUT_DIR,
+    SAMPLES_DIR,
     VOICES_DIR,
     Cancelled,
     auto_low_memory,
@@ -63,7 +67,10 @@ from common import (  # noqa: E402
 )
 from session import cleanup_orphans, list_sessions, load_session, save_session  # noqa: E402
 from textprep import LEXICON_PATH  # noqa: E402
-from voice_library import list_voices, load_voice, save_voice, voice_meta, voice_path  # noqa: E402
+import refclip  # noqa: E402
+from voice_library import (  # noqa: E402
+    delete_voice, list_voices, load_voice, ref_clip_path, save_voice, voice_meta, voice_path,
+)
 
 # ---------------------------------------------------------------------------
 # Static facts about the built-in speakers. Names come straight from the
@@ -91,7 +98,7 @@ LANGUAGES = [
 
 # Runtime settings, filled in by main() from the command line.
 CFG = SimpleNamespace(device="cpu", offline=False, low_memory=False, chunk_size=1,
-                      threads=None, dtype="auto")
+                      threads=None, dtype="auto", mock=False)
 
 # One loaded model at a time (8 GB box). Keyed by (kind, size, dtype_name).
 _CACHE: dict = {}
@@ -103,367 +110,120 @@ _CANCEL = threading.Event()
 
 
 # ---------------------------------------------------------------------------
-# Design system
-#
-# Tokens first, components second, so light/dark and density change in one
-# place. Colours are chosen for WCAG AA against their own surface, and every
-# status is carried by an icon and a word as well as a hue, so nothing depends
-# on colour vision alone.
+# Design system. The stylesheet and the browser-side behaviour live in ui/ as
+# real .css/.js files so they can be read, linted and diffed like any other code.
 # ---------------------------------------------------------------------------
-CSS = """
-/* ===========================================================================
-   Design tokens
-   Light is the default on :root. Dark mode follows GRADIO, not the OS: Gradio 6
-   toggles a `.dark` class on an ancestor and ships no prefers-color-scheme
-   rules at all, so keying these off the media query left every panel on its
-   light surface while Gradio's own components went dark. Custom properties
-   inherit, so redefining them under `.dark` re-themes everything below it.
-   =========================================================================== */
-:root {
-  --tts-surface:     #ffffff;
-  --tts-surface-2:   #f4f6f9;
-  --tts-surface-3:   #eaeef3;
-  --tts-border:      #dde2e9;
-  --tts-border-soft: #eaeef3;
-  --tts-text:        #12151a;
-  --tts-muted:       #5b6573;
-  /* Used on .tts-sec headings (0.74rem bold) and .tts-line--todo, neither of
-     which is WCAG "large text", so this needs 4.5:1 not 3:1. */
-  --tts-faint:       #606a79;
-  --tts-accent:      #2f5bd0;
-  --tts-accent-weak: #eaf0fd;
-  --tts-ok:          #10673b;
-  --tts-ok-weak:     #e4f5ec;
-  --tts-warn:        #85500b;
-  --tts-warn-weak:   #fdf1de;
-  --tts-err:         #a02a21;
-  --tts-err-weak:    #fdeeec;
+UI_DIR = Path(__file__).resolve().parent / "ui"
+ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
+CSS = (UI_DIR / "studio.css").read_text(encoding="utf-8")
+STUDIO_JS = (UI_DIR / "studio.js").read_text(encoding="utf-8")
+RECORDER_JS = (UI_DIR / "recorder.js").read_text(encoding="utf-8")
 
-  --tts-r:    14px;
-  --tts-r-sm: 9px;
-  --tts-r-xs: 6px;
+APP_NAME = "Skinnerbek Studio"
+APP_VERSION = "0.2"
 
-  --tts-s1: 6px;
-  --tts-s2: 10px;
-  --tts-s3: 14px;
-  --tts-s4: 20px;
-  --tts-s5: 28px;
-
-  --tts-shadow:    0 1px 2px rgba(14,18,26,.05), 0 6px 18px rgba(14,18,26,.06);
-  --tts-shadow-sm: 0 1px 2px rgba(14,18,26,.07);
-
-  --tts-ease: cubic-bezier(.22,.61,.36,1);
-  --tts-dur:  .26s;
-}
-.dark {
-  --tts-surface:     #161a20;
-  --tts-surface-2:   #1c222a;
-  --tts-border:      #2b323c;
-  --tts-surface-3:   #232a34;
-  --tts-border-soft: #232a34;
-  --tts-text:        #eef1f6;
-  --tts-muted:       #a4aebc;
-  --tts-faint:       #87919e;   /* 4.5:1 on every dark surface, see light note */
-  --tts-accent:      #8fb0ff;
-  --tts-accent-weak: #1a2740;
-  --tts-ok:          #6ed49b;
-  --tts-ok-weak:     #10281d;
-  --tts-warn:        #f0bd6c;
-  --tts-warn-weak:   #2a2013;
-  --tts-err:         #ff9f96;
-  --tts-err-weak:    #2e1816;
-
-  --tts-shadow:    0 1px 2px rgba(0,0,0,.45), 0 6px 18px rgba(0,0,0,.34);
-  --tts-shadow-sm: 0 1px 2px rgba(0,0,0,.5);
+# Lucide-style stroke icons, inlined so the app needs no network or icon font.
+_ICON_PATHS = {
+    "script": '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/>',
+    "voice": '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+    "render": '<path d="M3 12h1M7 8v8M11 5v14M15 9v6M19 7v10"/>',
+    "spark": '<path d="M12 3l1.8 4.7 4.7 1.8-4.7 1.8L12 16l-1.8-4.7L5.5 9.5l4.7-1.8z"/><path d="M19 15l.9 2.1 2.1.9-2.1.9L19 21l-.9-2.1-2.1-.9 2.1-.9z"/>',
+    "mic": '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
+    "grid": '<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',
+    "play": '<circle cx="12" cy="12" r="9"/><path d="M10 8.5v7l6-3.5z"/>',
+    "chip": '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
+    "book": '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/>',
+    "history": '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/>',
+    "broom": '<path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/>',
+    "moon": '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
+    "lock": '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+    "wifi_off": '<path d="M2 2l20 20M8.5 16.5a5 5 0 0 1 7 0M5 13a10 10 0 0 1 5.2-2.8M19 13a10 10 0 0 0-2.4-1.7M12 20h.01"/>',
 }
 
-/* ===========================================================================
-   Motion. One vocabulary, used everywhere, and every bit of it is switched off
-   under prefers-reduced-motion at the bottom of this file.
-   =========================================================================== */
-@keyframes tts-rise   { from { opacity:0; transform: translateY(8px);  } to { opacity:1; transform:none; } }
-@keyframes tts-fade   { from { opacity:0; } to { opacity:1; } }
-@keyframes tts-slide  { from { opacity:0; transform: translateX(-6px); } to { opacity:1; transform:none; } }
-@keyframes tts-pop    { 0% { transform: scale(.94); opacity:0; } 60% { transform: scale(1.02); } 100% { transform:none; opacity:1; } }
-@keyframes tts-spin   { to { transform: rotate(360deg); } }
-@keyframes tts-shimmer{ 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-@keyframes tts-breathe{ 0%,100% { opacity:1; } 50% { opacity:.55; } }
 
-.gradio-container { max-width: 1320px !important; }
+def _icon(name: str) -> str:
+    return ('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+            f'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{_ICON_PATHS[name]}</svg>')
 
-/* ===========================================================================
-   Masthead
-   =========================================================================== */
-.gradio-container .tts-head {
-  position: relative; overflow: hidden;
-  display: flex; flex-direction: column; gap: var(--tts-s3);
-  background: var(--tts-surface);
-  border: 1px solid var(--tts-border);
-  border-radius: var(--tts-r);
-  box-shadow: var(--tts-shadow);
-  /* Full-bleed: pull into the app's side padding by exactly the horizontal
-     inset so the h1, the tagline and the chips all start on the same left
-     edge as every tab's first section heading. */
-  padding: var(--tts-s4) var(--tts-s3);
-  margin: 0 calc(-1 * var(--tts-s3)) var(--tts-s4);
-  animation: tts-rise .4s var(--tts-ease) both;
-}
-.tts-head::after {
-  content: ""; position: absolute; inset: 0 0 auto 0; height: 3px;
-  background: linear-gradient(90deg, var(--tts-accent), transparent 70%);
-  opacity: .55;
-}
-.tts-head > * { width: 100%; }
-.tts-head__lead h1 {
-  font-size: 1.5rem; font-weight: 660; letter-spacing: -.02em;
-  margin: 0 0 5px; color: var(--tts-text); line-height: 1.2;
-}
-.tts-head__lead p { margin: 0; color: var(--tts-muted); font-size: .93rem; line-height: 1.55; max-width: 68ch; }
-.tts-head .tts-chips { margin-top: 0; }
-.tts-head .tts-chips + .tts-note { margin-top: var(--tts-s2); }
 
-/* ===========================================================================
-   Status chips
-   =========================================================================== */
-.tts-chips { display: flex; flex-wrap: wrap; gap: var(--tts-s1); margin-top: var(--tts-s3); }
-.tts-chip {
-  display: inline-flex; align-items: center; gap: 7px;
-  padding: 5px 11px; border-radius: 999px;
-  font-size: .79rem; font-weight: 500; line-height: 1.5;
-  border: 1px solid var(--tts-border);
-  background: var(--tts-surface-2); color: var(--tts-text);
-  transition: transform var(--tts-dur) var(--tts-ease), box-shadow var(--tts-dur) var(--tts-ease);
-  animation: tts-pop .34s var(--tts-ease) both;
-}
-.tts-chips .tts-chip:nth-child(1) { animation-delay: .02s; }
-.tts-chips .tts-chip:nth-child(2) { animation-delay: .06s; }
-.tts-chips .tts-chip:nth-child(3) { animation-delay: .10s; }
-.tts-chips .tts-chip:nth-child(4) { animation-delay: .14s; }
-.tts-chips .tts-chip:nth-child(5) { animation-delay: .18s; }
-.tts-chips .tts-chip:nth-child(6) { animation-delay: .22s; }
-.tts-chip:hover { transform: translateY(-1px); box-shadow: var(--tts-shadow-sm); }
-.tts-chip b { font-weight: 640; }
-.tts-chip .k { color: var(--tts-muted); font-weight: 500; }
-.tts-chip--ok   { background: var(--tts-ok-weak);   border-color: transparent; color: var(--tts-ok); }
-.tts-chip--warn { background: var(--tts-warn-weak); border-color: transparent; color: var(--tts-warn); }
-.tts-chip--err  { background: var(--tts-err-weak);  border-color: transparent; color: var(--tts-err); }
-.tts-chip--err  { animation: tts-pop .34s var(--tts-ease) both, tts-breathe 2.6s ease-in-out 1s 3; }
+# The mark: a speech bubble whose top edge is Table Mountain, sound bars inside.
+# Drawn as SVG (not the generated bitmap) so it is crisp at every size and its
+# bars can animate. assets/favicon.svg is the static copy of the same shape.
+LOGO_SVG = (
+    '<svg viewBox="0 0 64 64" role="img" aria-label="Skinnerbek logo">'
+    '<defs><linearGradient id="tts-logo-g" x1="0" y1="1" x2="1" y2="0">'
+    '<stop offset="0" stop-color="#ff5a5f"/><stop offset=".55" stop-color="#ff8f50"/>'
+    '<stop offset="1" stop-color="#ffb547"/></linearGradient></defs>'
+    '<rect width="64" height="64" rx="16" fill="#0f1424"/>'
+    '<path d="M13 27q0-6.5 6-7.5l3-4.5 4 1.2 3-1.6 6 .9 4-1 4 .8 3 4.2q6 1 6 7.5v9.5q0 7-7 7H28l-11 8 2.6-8.2'
+    'Q13 43 13 36.5z" fill="none" stroke="url(#tts-logo-g)" stroke-width="4.4" stroke-linejoin="round"/>'
+    '<g fill="#fff4e3">'
+    '<rect class="bar" x="21.2" y="27" width="3.6" height="8" rx="1.8"/>'
+    '<rect class="bar" x="26.6" y="23.5" width="3.6" height="15" rx="1.8"/>'
+    '<rect class="bar" x="32" y="21" width="3.6" height="20" rx="1.8"/>'
+    '<rect class="bar" x="37.4" y="23.5" width="3.6" height="15" rx="1.8"/>'
+    '<rect class="bar" x="42.8" y="27" width="3.6" height="8" rx="1.8"/>'
+    '</g></svg>'
+)
 
-/* ===========================================================================
-   Callouts
-   =========================================================================== */
-.tts-note {
-  border: 1px solid var(--tts-border);
-  background: var(--tts-surface-2);
-  border-radius: var(--tts-r-sm);
-  padding: 11px 14px;
-  font-size: .865rem; line-height: 1.6; color: var(--tts-text);
-  animation: tts-rise .3s var(--tts-ease) both;
-}
-.tts-note + .tts-note { margin-top: var(--tts-s2); }
-.tts-note--warn { border-color: var(--tts-warn); background: var(--tts-warn-weak); }
-.tts-note--err  { border-color: var(--tts-err);  background: var(--tts-err-weak); }
-.tts-note--ok   { border-color: var(--tts-ok);   background: var(--tts-ok-weak); }
-.tts-note strong { font-weight: 640; }
-.tts-note code {
-  background: var(--tts-surface-3); padding: 1.5px 5px;
-  border-radius: var(--tts-r-xs); font-size: .9em; overflow-wrap: anywhere;
-}
-.tts-note ul { margin: 8px 0 0; padding-left: 18px; }
-.tts-note li { margin: 2px 0; }
 
-/* ===========================================================================
-   Section headings. One rhythm for every tab.
-   =========================================================================== */
-.tts-sec {
-  display: flex; align-items: center; gap: var(--tts-s2);
-  margin: var(--tts-s5) 0 var(--tts-s2);
-  animation: tts-fade .3s var(--tts-ease) both;
-}
-.tts-col > *:first-child .tts-sec { margin-top: 0; }
-.tts-sec h2, .tts-sec h3 {
-  margin: 0; font-size: .74rem; font-weight: 680;
-  text-transform: uppercase; letter-spacing: .075em;
-  color: var(--tts-faint); white-space: nowrap;
-}
-.tts-sec::after {
-  content: ""; flex: 1 1 auto; height: 1px; background: var(--tts-border-soft);
-}
+def _mountain_wave(offset: float = 0.0, amp: float = 1.0) -> str:
+    """Table Mountain's skyline (Devil's Peak, the flat table, Lion's Head) as an
+    audio waveform: the silhouette plus a deterministic ripple along it."""
+    import math
 
-/* ===========================================================================
-   Render progress
-   =========================================================================== */
-.tts-prog {
-  border: 1px solid var(--tts-border);
-  border-radius: var(--tts-r);
-  background: var(--tts-surface);
-  box-shadow: var(--tts-shadow-sm);
-  padding: var(--tts-s3) var(--tts-s3) var(--tts-s3);
-  animation: tts-rise .3s var(--tts-ease) both;
-}
-.tts-prog__top {
-  display: flex; justify-content: space-between; align-items: baseline;
-  gap: var(--tts-s2); flex-wrap: wrap; margin-bottom: var(--tts-s2);
-}
-.tts-prog__title { font-weight: 645; font-size: .95rem; color: var(--tts-text); letter-spacing: -.01em; }
-.tts-prog__meta  { font-size: .8rem; color: var(--tts-muted); font-variant-numeric: tabular-nums; }
-.tts-bar {
-  position: relative; height: 8px; border-radius: 999px; overflow: hidden;
-  background: var(--tts-surface-3);
-}
-.tts-bar__fill {
-  height: 100%; border-radius: 999px; background: var(--tts-accent);
-  transition: width .5s var(--tts-ease), background-color var(--tts-dur) var(--tts-ease);
-  position: relative; overflow: hidden;
-}
-.tts-bar__fill::after {
-  content: ""; position: absolute; inset: 0;
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,.42), transparent);
-  background-size: 200% 100%;
-  animation: tts-shimmer 1.6s linear infinite;
-}
-.tts-bar__fill--done { background: var(--tts-ok); }
-.tts-bar__fill--err  { background: var(--tts-err); }
-.tts-bar__fill--done::after, .tts-bar__fill--err::after { display: none; }
+    profile = [(0, 168), (110, 158), (150, 132), (195, 70), (222, 96), (250, 82), (470, 80),
+               (500, 118), (528, 122), (552, 98), (572, 120), (620, 166)]
 
-.tts-lines { list-style: none; margin: var(--tts-s3) 0 0; padding: 0; display: grid; gap: 3px; }
-.tts-line {
-  display: grid; grid-template-columns: 18px 1fr auto; align-items: baseline;
-  gap: var(--tts-s2); padding: 7px 9px; border-radius: var(--tts-r-sm);
-  font-size: .845rem; line-height: 1.5; color: var(--tts-text);
-  border: 1px solid transparent;
-  transition: background-color var(--tts-dur) var(--tts-ease), border-color var(--tts-dur) var(--tts-ease);
-  animation: tts-slide .3s var(--tts-ease) both;
-}
-.tts-line--done { background: var(--tts-surface-2); }
-.tts-line--now  { background: var(--tts-accent-weak); border-color: var(--tts-accent); }
-.tts-line--todo { color: var(--tts-faint); }
-.tts-line__ico  { font-size: .88rem; text-align: center; line-height: 1.5; }
-.tts-line--done .tts-line__ico { color: var(--tts-ok); }
-.tts-line--now  .tts-line__ico { color: var(--tts-accent); }
-.tts-line__txt  { overflow-wrap: anywhere; }
-.tts-line__t    { font-size: .76rem; color: var(--tts-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.tts-spin { display: inline-block; animation: tts-spin 1.1s linear infinite; }
+    def base(x: float) -> float:
+        for (x0, y0), (x1, y1) in zip(profile, profile[1:]):
+            if x0 <= x <= x1:
+                t = (x - x0) / (x1 - x0)
+                t = t * t * (3 - 2 * t)            # smoothstep between control points
+                return y0 + (y1 - y0) * t
+        return profile[-1][1]
 
-/* ===========================================================================
-   Prepared-text preview
-   =========================================================================== */
-.tts-prev { display: grid; gap: 4px; margin-top: var(--tts-s2); }
-.tts-prev__row {
-  display: grid; grid-template-columns: 24px 1fr; gap: var(--tts-s2);
-  padding: 8px 10px; border-radius: var(--tts-r-sm);
-  background: var(--tts-surface-2); border: 1px solid var(--tts-border-soft);
-  font-size: .845rem; line-height: 1.55; color: var(--tts-text);
-  animation: tts-slide .28s var(--tts-ease) both;
-  transition: border-color var(--tts-dur) var(--tts-ease);
-}
-.tts-prev__row:hover { border-color: var(--tts-border); }
-.tts-prev__n { color: var(--tts-faint); font-variant-numeric: tabular-nums; text-align: right; }
-.tts-prev__gap { color: var(--tts-faint); font-size: .77rem; }
+    pts = []
+    for i in range(0, 621, 3):
+        x = float(i)
+        env = 2.2 + 5.5 * math.exp(-((x - 330) / 70) ** 2) + 3.5 * math.exp(-((x - 430) / 30) ** 2)
+        ripple = amp * env * math.sin(x * 0.42) * (0.6 + 0.4 * math.sin(x * 0.07))
+        pts.append(f"{x:.0f},{base(x) + offset + ripple:.1f}")
+    return "M" + " L".join(pts)
 
-/* ===========================================================================
-   Key/value table + empty state
-   =========================================================================== */
-.tts-empty {
-  padding: 26px 18px; text-align: center; color: var(--tts-muted);
-  font-size: .87rem; line-height: 1.6;
-  border: 1px dashed var(--tts-border);
-  border-radius: var(--tts-r); background: var(--tts-surface-2);
-  animation: tts-fade .3s var(--tts-ease) both;
-}
-.tts-empty b { display: block; color: var(--tts-text); font-weight: 620; margin-bottom: 3px; }
-.tts-kv {
-  width: 100%; border-collapse: collapse; font-size: .855rem;
-  border: 1px solid var(--tts-border); border-radius: var(--tts-r-sm);
-  overflow: hidden; background: var(--tts-surface-2);
-}
-.tts-kv td { padding: 8px 11px; border-bottom: 1px solid var(--tts-border-soft); color: var(--tts-text); }
-.tts-kv td:first-child { color: var(--tts-muted); width: 46%; }
-.tts-kv tr:last-child td { border-bottom: 0; }
-.tts-kv tr { transition: background-color var(--tts-dur) var(--tts-ease); }
-.tts-kv tr:hover { background: var(--tts-surface-3); }
 
-/* ===========================================================================
-   Layout rhythm
-   Three classes carry every tab's spacing so the tabs cannot drift apart:
-   .tts-split  the two-column shell (work column | render column)
-   .tts-col    a stacked column of blocks
-   .tts-actions a row of buttons
-   Gradio lays Rows and Columns out with flexbox `gap`, so overriding gap on
-   the element our elem_classes lands on is enough to re-space a whole tab.
-   =========================================================================== */
-.gradio-container .tts-split { gap: var(--tts-s5) !important; align-items: flex-start !important; }
-.gradio-container .tts-col   { gap: var(--tts-s3) !important; }
+def _asset_uri(stem: str) -> Optional[str]:
+    """A bitmap from assets/ as a data: URI (no static-file route needed), or
+    None so the caller falls back to drawn SVG art."""
+    import base64
 
-/* Buttons in a row: one height, one radius, bottom-aligned so a button next to
-   a labelled input lines up with that input's box rather than with its label. */
-.gradio-container .tts-actions {
-  gap: var(--tts-s2) !important;
-  align-items: flex-end !important;
-  flex-wrap: wrap !important;
-  margin: var(--tts-s1) 0 var(--tts-s1) !important;
-}
-.gradio-container .tts-actions > button {
-  min-height: 42px !important; border-radius: var(--tts-r-sm) !important;
-  font-weight: 560 !important; letter-spacing: -.005em;
-  transition: transform .12s var(--tts-ease), box-shadow var(--tts-dur) var(--tts-ease),
-              filter var(--tts-dur) var(--tts-ease) !important;
-}
-.gradio-container button:not(:disabled):hover { filter: brightness(1.04); }
-.gradio-container button:not(:disabled):active { transform: translateY(1px); }
+    for ext, mime in (("webp", "image/webp"), ("png", "image/png"), ("jpg", "image/jpeg")):
+        p = ASSETS_DIR / f"{stem}.{ext}"
+        if p.exists():
+            return f"data:{mime};base64,{base64.b64encode(p.read_bytes()).decode()}"
+    return None
 
-.gradio-container .tabitem { animation: tts-rise .32s var(--tts-ease) both; padding-top: var(--tts-s4) !important; }
-.gradio-container .block { border-radius: var(--tts-r-sm) !important; }
-.gradio-container label > span { font-weight: 560 !important; }
 
-/* Accordions are section dividers, not raised cards, and they need the same
-   air above them that a section heading gets. */
-.gradio-container .tts-pane {
-  border-radius: var(--tts-r) !important;
-  margin-top: var(--tts-s2) !important;
-}
-.gradio-container .tts-pane > .label-wrap { padding: var(--tts-s2) var(--tts-s3) !important; }
-
-/* A lead note -- the one-line intro under a tab or a section heading. Same
-   full-bleed trick as the masthead so its text sits on the section-heading
-   grid instead of 14px inboard of it. */
-.gradio-container .tts-lead {
-  margin-left: calc(-1 * var(--tts-s3)) !important;
-  margin-right: calc(-1 * var(--tts-s3)) !important;
-  margin-bottom: var(--tts-s4) !important;
-  padding-left: var(--tts-s3) !important;
-  padding-right: var(--tts-s3) !important;
-}
-.tts-sec + .tts-lead { margin-top: var(--tts-s1) !important; }
-
-/* Status lines sit under the control that produces them, not glued to it. */
-.gradio-container .tts-status { margin-top: calc(var(--tts-s1) * -1) !important; }
-
-/* ===========================================================================
-   Accessibility
-   =========================================================================== */
-:where(button, a, input, textarea, select, summary, [tabindex]):focus-visible {
-  outline: 3px solid var(--tts-accent) !important;
-  outline-offset: 2px !important;
-  border-radius: var(--tts-r-xs);
-}
-.tts-sr {
-  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
-  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .tts-head, .tts-chip, .tts-note, .tts-sec, .tts-prog, .tts-line,
-  .tts-prev__row, .tts-empty, .gradio-container .tabitem {
-    animation: none !important;
-  }
-  .tts-bar__fill, .tts-line, .tts-chip, .tts-prev__row, .tts-kv tr,
-  .gradio-container .tts-actions > button { transition: none !important; }
-  .tts-bar__fill::after, .tts-spin { animation: none !important; }
-  .tts-bar__fill::after { display: none; }
-  .gradio-container button:not(:disabled):active { transform: none; }
-}
-"""
+def _hero_art() -> str:
+    """The masthead illustration: assets/banner.* if present, otherwise the
+    drawn skyline-waveform."""
+    uri = _asset_uri("banner")
+    if uri:
+        return f'<div class="tts-hero__art" aria-hidden="true"><img alt="" src="{uri}"></div>'
+    stars = "".join(f'<circle class="star" cx="{x}" cy="{y}" r="{r}"/>' for x, y, r in
+                    ((300, 22, 1.2), (372, 40, 1.6), (455, 18, 1.1), (520, 46, 1.4), (590, 26, 1.2),
+                     (250, 44, 1), (410, 30, .9)))
+    rings = "".join(f'<circle class="ring" cx="360" cy="80" r="{r}"/>' for r in (48, 88, 132))
+    return (
+        '<svg class="tts-hero__art" viewBox="0 0 620 200" preserveAspectRatio="xMaxYMid slice" aria-hidden="true">'
+        '<defs><linearGradient id="tts-sunset" x1="0" x2="1"><stop offset="0" stop-color="#ff5a5f" stop-opacity="0"/>'
+        '<stop offset=".25" stop-color="#ff6b5a"/><stop offset=".7" stop-color="#ff9a4d"/>'
+        '<stop offset="1" stop-color="#ffb547"/></linearGradient></defs>'
+        f'{rings}{stars}'
+        f'<path class="wave wave--2" style="--len:1500" d="{_mountain_wave(16, .6)}"/>'
+        f'<path class="wave" style="--len:1500" d="{_mountain_wave()}"/>'
+        '</svg>'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +242,12 @@ def get_model(kind: str, size: str):
     dtype = resolve_dtype(CFG.device, size, CFG.dtype, low_memory=_low_memory())
     key = (kind, size, str(dtype))
     if key in _CACHE:
+        return _CACHE[key]
+    if CFG.mock:
+        from mock_model import MockTTSModel
+
+        _CACHE.clear()
+        _CACHE[key] = MockTTSModel(kind, size)
         return _CACHE[key]
 
     if _CACHE:
@@ -600,7 +366,13 @@ def _lang(display: str) -> str:
 
 
 def _seeded(seed):
-    if seed is None or seed == "":
+    """Seed torch for a repeatable take. 0 / blank means a fresh take: Gradio 6
+    turns an empty number box into 0, so 0 can't double as a real seed --
+    otherwise every take, and every "Fix one line" retry, would be identical."""
+    if seed is None or seed == "" or int(seed) == 0:
+        import torch
+
+        torch.seed()        # reseed from OS entropy so a fresh take really is fresh
         return
     import torch
 
@@ -674,7 +446,7 @@ def _progress_html(lines: List[str], done: List[Dict[str, Any]], started: float,
 
     meta = [f"{_fmt_dur(elapsed)} elapsed"]
     if eta is not None:
-        meta.append(f"~{_fmt_dur(eta)} left")
+        meta.append(f"about {_fmt_dur(eta)} left")
     audio = sum(d["audio"] for d in done)
     if audio:
         meta.append(f"{audio:.1f}s audio")
@@ -687,7 +459,7 @@ def _progress_html(lines: List[str], done: List[Dict[str, Any]], started: float,
             ico, cls, right = "&#10003;", " tts-line--done", f'{d["seconds"]:.0f}s &middot; {d["audio"]:.1f}s'
             aria = "done"
         elif i == n and state == "running":
-            ico, cls, right = '<span class="tts-spin">&#9696;</span>', " tts-line--now", "rendering"
+            ico, cls, right = '<span class="tts-spin">&#9696;</span>', " tts-line--now", "rendering…"
             aria = "in progress"
         else:
             ico, cls, right = "&#9675;", " tts-line--todo", ""
@@ -705,7 +477,7 @@ def _progress_html(lines: List[str], done: List[Dict[str, Any]], started: float,
     return (
         f'<div class="tts-prog" role="status" aria-live="polite">'
         f'<div class="tts-prog__top">'
-        f'<span class="tts-prog__title">{escape(title)}</span>'
+        f'<span class="tts-prog__title">{_EQ if state == "running" else ""}{escape(title)}</span>'
         f'<span class="tts-prog__meta">{" &middot; ".join(meta)}</span>'
         f"</div>"
         f'<div class="tts-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" '
@@ -716,15 +488,35 @@ def _progress_html(lines: List[str], done: List[Dict[str, Any]], started: float,
     )
 
 
-def _idle_html(title: str = "Nothing rendering", msg: str = "") -> str:
+_EQ = '<span class="tts-eq" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>'
+
+# A small waveform-in-a-bubble for empty states, in the brand gradient.
+_EMPTY_ART = (
+    '<svg class="tts-empty__art" viewBox="0 0 120 72" aria-hidden="true">'
+    '<defs><linearGradient id="tts-sunset-e" x1="0" x2="1"><stop offset="0" stop-color="#ff6b5a"/>'
+    '<stop offset="1" stop-color="#ffb547"/></linearGradient></defs>'
+    '<rect class="b" x="14" y="6" width="92" height="52" rx="16"/><path class="b" d="M30 56l-8 12 18-10z"/>'
+    '<path class="s" d="M34 32v0M44 24v16M54 18v28M64 26v12M74 20v24M84 30v4"/></svg>'
+)
+
+
+def _idle_html(title: str = "Nothing rendering", msg: str = "", art: bool = True) -> str:
     body = f"<b>{escape(title)}</b>{escape(msg)}" if msg else f"<b>{escape(title)}</b>"
-    return f'<div class="tts-empty">{body}</div>'
+    return f'<div class="tts-empty">{_EMPTY_ART if art else ""}{body}</div>'
 
 
-def _sec(title: str, level: int = 2) -> str:
+def _sec(title: str, level: int = 2, n: Optional[int] = None) -> str:
     """One section-heading rhythm for every tab: a small uppercase label with a
-    rule running to the edge. Kept as a helper so no tab can drift."""
-    return f'<div class="tts-sec"><h{level}>{escape(title)}</h{level}></div>'
+    rule running to the edge, optionally numbered as a step."""
+    num = f'<span class="tts-sec__n" aria-hidden="true">{n}</span>' if n else ""
+    return f'<div class="tts-sec">{num}<h{level}>{escape(title)}</h{level}></div>'
+
+
+def _title(icon: str, title: str, sub: str = "") -> str:
+    """A card's heading: icon tile, title, one-line explanation."""
+    p = f"<p>{sub}</p>" if sub else ""
+    return (f'<div class="tts-title"><span class="tts-title__ico">{_icon(icon)}</span>'
+            f"<div><h2>{escape(title)}</h2>{p}</div></div>")
 
 
 # ---------------------------------------------------------------------------
@@ -752,8 +544,10 @@ def _run_synth(kind: str, p: dict, lines: List[str], events: "queue.Queue"):
         sf.write(path, np.asarray(wav, dtype=np.float32), sr)
         part_paths.append(str(path))
         audio = len(wav) / float(sr or 24000)
-        # Feed the measured rate back so future runs can be estimated up front.
-        record_speed(seconds, audio * 12.0)
+        # Feed the measured rate back so future runs can be estimated up front
+        # (never from the mock model, which would make every estimate absurd).
+        if not CFG.mock:
+            record_speed(seconds, audio * 12.0)
         events.put({"i": i, "seconds": seconds, "audio": audio, "path": str(path)})
 
     events.put({"phase": "loading"})
@@ -818,8 +612,7 @@ def _loading_html(lines: List[str], started: float) -> str:
     return (
         f'<div class="tts-prog" role="status" aria-live="polite">'
         f'<div class="tts-prog__top">'
-        f'<span class="tts-prog__title">Loading the model'
-        f'<span class="tts-spin" aria-hidden="true"> &#9696;</span></span>'
+        f'<span class="tts-prog__title">{_EQ}Loading the voice model</span>'
         f'<span class="tts-prog__meta">{_fmt_dur(time.time() - started)} elapsed</span></div>'
         f'<div class="tts-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" '
         f'aria-valuenow="0" aria-label="Rendering progress">'
@@ -1037,57 +830,195 @@ def do_regen_line(state, which, seed):
         return gr.update(), f"**Could not regenerate.** {type(e).__name__}: {e}", state
 
 
+def _hue(name: str) -> int:
+    """A stable avatar hue per voice name, kept in the warm half of the wheel."""
+    return (sum(ord(c) * (i + 7) for i, c in enumerate(name)) % 70) - 20
+
+
+def _initials(label: str) -> str:
+    parts = [p for p in label.replace("_", " ").replace("-", " ").split() if p]
+    return ("".join(p[0] for p in parts[:2]) or "?").upper()
+
+
+def _voice_card_html(value: Optional[str]) -> str:
+    """Explain the selected voice: what it is, how it was made, what it suits."""
+    if not value or ":" not in value:
+        return _idle_html("No voice selected", " Pick one from the list above.", art=False)
+    kind, ref = value.split(":", 1)
+    if kind == "preset":
+        label = dict(PRESET_SPEAKERS).get(ref, ref).split("  (")[0]
+        english = ref in ("ryan", "aiden")
+        tags = ['<span class="tts-tag">Built-in</span>',
+                '<span class="tts-tag tts-tag--ok">English</span>' if english
+                else '<span class="tts-tag tts-tag--warn">Other languages</span>']
+        desc = ("A stock Qwen3-TTS speaker. Clear and reliable, but no South African accent; "
+                "use a cloned voice for that.") if english else (
+                "Tuned for another language. It will read English, with that accent.")
+    else:
+        label = ref
+        meta = voice_meta(ref) or {}
+        tags = ['<span class="tts-tag tts-tag--accent">Cloned</span>',
+                f'<span class="tts-tag">{escape(str(meta.get("model_size", "?")))}</span>',
+                '<span class="tts-tag">timbre only</span>' if meta.get("x_vector_only_mode")
+                else '<span class="tts-tag tts-tag--ok">full clone</span>']
+        if meta.get("created"):
+            tags.append(f'<span class="tts-tag">{escape(meta["created"])}</span>')
+        said = (meta.get("ref_text") or "").strip()
+        more = "…" if len(said) > 110 else ""
+        desc = (f"Cloned from a reference clip: <q>{escape(said[:110])}{more}</q>"
+                if said else "Cloned from a reference clip, timbre only.")
+    return (f'<div class="tts-vcard"><div class="tts-avatar" style="--h:{_hue(label)}">'
+            f"{escape(_initials(label))}</div><div><h4>{escape(label)}</h4><p>{desc}</p>"
+            f'<div class="tts-tags">{"".join(tags)}</div></div></div>')
+
+
+def _voices_gallery_html() -> str:
+    names = list_voices()
+    if not names:
+        art = _asset_uri("empty-voices")
+        if art:
+            return ('<div class="tts-empty"><img class="tts-empty__img" alt="" src="' + art + '">'
+                    "<b>No saved voices yet</b>Record or upload a clip on the left and it will "
+                    "appear here.</div>")
+        return _idle_html("No saved voices yet",
+                          " Record or upload a clip on the left and it will appear here.")
+    return ('<div class="tts-gallery">'
+            + "".join(_voice_card_html(f"voice:{n}") for n in names) + "</div>")
+
+
+def _clip_report_html(path) -> str:
+    """The quality report shown as soon as a clip is recorded or uploaded."""
+    if not path:
+        return ""
+    try:
+        r = refclip.analyze(path)
+    except Exception as e:  # noqa: BLE001
+        return ('<div class="tts-qa tts-qa--unusable"><div class="tts-qa__grade">&#10007; Could not read '
+                f"this file</div><div>{escape(type(e).__name__)}: {escape(str(e))}. "
+                "Try a WAV, FLAC or MP3.</div></div>")
+    icon, verdict = {"good": ("&#10003;", "Great clip"), "usable": ("!", "Usable, with notes"),
+                     "unusable": ("&#10007;", "This clip won't make a good voice")}[r.grade]
+    span = 45.0
+    mark = min(100.0, r.duration / span * 100)
+    lo, hi = refclip.IDEAL_SECONDS
+    stats = [("Length", f"{r.duration:.1f}s"), ("Speech", f"{r.speech_seconds:.1f}s"),
+             ("Loudness", f"{r.rms_db:.0f} dB"), ("Peak", f"{r.peak_db:.1f} dB")]
+    issues = "".join(f"<li>{escape(m)}</li>" for _, m in r.issues)
+    channels = "stereo" if r.channels > 1 else "mono"
+    return (
+        f'<div class="tts-qa tts-qa--{r.grade}" role="status">'
+        f'<div class="tts-qa__head"><span class="tts-qa__grade">{icon} {verdict}</span>'
+        f'<span class="tts-tag">{r.sample_rate} Hz &middot; {channels}</span></div>'
+        f'<div class="tts-lenbar" title="Green is the ideal {lo:.0f}-{hi:.0f} second range">'
+        f'<div class="tts-lenbar__zone" style="left:{lo / span * 100:.1f}%;width:{(hi - lo) / span * 100:.1f}%"></div>'
+        f'<div class="tts-lenbar__mark" style="left:calc({mark:.1f}% - 1px)"></div></div>'
+        '<div class="tts-qa__stats">'
+        + "".join(f'<div class="tts-stat"><small>{k}</small><b>{v}</b></div>' for k, v in stats)
+        + "</div>"
+        + (f"<ul>{issues}</ul>" if issues else
+           '<div style="font-size:.84rem">Clear, well-levelled and a good length. '
+           "Add the transcript and save.</div>")
+        + "</div>"
+    )
+
+
+def _bad(msg: str) -> str:
+    return f'<div class="tts-note tts-note--err" role="alert">{msg}</div>'
+
+
 def do_add_voice(name, ref_audio, ref_text, xvec_only, size,
                  progress=gr.Progress(track_tqdm=True)):
+    """Returns (status html, speak voice dropdown, gallery html, manage dropdown)."""
+    keep = (gr.update(), gr.update(), gr.update())
+    name = (name or "").strip()
     try:
-        name = (name or "").strip()
         if not name:
-            return "Give the voice a name.", gr.update()
+            return (_bad("Give the voice a name."), *keep)
         if not name.replace("_", "").replace("-", "").isalnum():
-            return "Use only letters, numbers, - and _ in the name.", gr.update()
+            return (_bad("Use only letters, numbers, - and _ in the name."), *keep)
         if not ref_audio:
-            return "Upload or record a reference clip first.", gr.update()
+            return (_bad("Record or upload a reference clip first."), *keep)
         if not xvec_only and not (ref_text or "").strip():
-            return ("Type the transcript of the clip (word for word), or tick "
-                    "'timbre only' to skip it (lower quality)."), gr.update()
+            return (_bad("Type the transcript of the clip (word for word), or tick "
+                         "<strong>timbre only</strong> to skip it (lower quality)."), *keep)
         if voice_path(name).exists():
-            return f"A voice called '{name}' already exists. Pick another name or delete it below.", gr.update()
+            return (_bad(f"A voice called <strong>{escape(name)}</strong> already exists. "
+                         "Pick another name or delete it on the right."), *keep)
 
-        progress(0, desc="Loading the cloning model...")
+        progress(0.05, desc="Checking the clip…")
+        clean, report = refclip.prepare(ref_audio, ref_clip_path(name))
+        if not report.ok:
+            clean.unlink(missing_ok=True)
+            why = "<br>".join(escape(m) for lvl, m in report.issues if lvl == "err")
+            return (_bad(f"<strong>That clip can't make a usable voice.</strong><br>{why}"), *keep)
+
+        progress(0.2, desc="Loading the cloning model…")
         model = get_model("Base", size)
-        progress(0.5, desc="Encoding the reference clip...")
+        progress(0.6, desc="Learning the voice…")
         items = model.create_voice_clone_prompt(
-            ref_audio=ref_audio,
+            ref_audio=str(clean),
             ref_text=((ref_text or "").strip() or None),
             x_vector_only_mode=bool(xvec_only),
         )
-        path = save_voice(name, items, ref_audio=str(ref_audio), model_size=size)
-        return (f"Saved '{name}' -> `{path}`. It's now in the voice list on the Speak tab.",
-                gr.update(choices=voice_choices()))
+        save_voice(name, items, ref_audio=str(clean), model_size=size)
+        gr.Info(f"Saved the voice '{name}'.")
+        names = list_voices()
+        return (f'<div class="tts-note tts-note--ok"><strong>Saved {escape(name)}.</strong> '
+                "It's selected on the Speak tab, ready to use.</div>",
+                gr.update(choices=voice_choices(), value=f"voice:{name}"),
+                _voices_gallery_html(),
+                gr.update(choices=names, value=name))
     except (Exception, SystemExit) as e:  # noqa: BLE001
-        return f"**Could not save the voice.**\n\n{type(e).__name__}: {e}", gr.update()
+        # A failed encode must not leave an orphaned clip behind.
+        if name and not voice_path(name).exists():
+            ref_clip_path(name).unlink(missing_ok=True)
+        return (_bad(f"<strong>Could not save the voice.</strong><br>"
+                     f"{escape(type(e).__name__)}: {escape(str(e))}"), *keep)
 
 
-def do_delete_voice(name):
+def do_pick_voice(name):
+    """Manage panel: audition the clip a saved voice was made from."""
+    if not name:
+        return None, _idle_html("No voice selected", art=False)
+    ref = ref_clip_path(name)
+    if not ref.exists():
+        # Voices made before clips were kept beside them record wherever the
+        # clip was, often relative to scripts/ (the CLI's working directory).
+        old = (voice_meta(name) or {}).get("ref_audio")
+        old = Path(old) if old else None
+        if old is not None and not old.is_absolute():
+            old = (Path(__file__).resolve().parent / old).resolve()
+        ref = old if old is not None and old.exists() else None
+    return (str(ref) if ref else None), _voice_card_html(f"voice:{name}")
+
+
+def do_delete_voice(name, armed):
+    """Two-step delete: the first press arms it, the second removes the voice
+    and its reference clip. Returns (status, speak dropdown, manage dropdown,
+    button, armed)."""
     try:
         if not name:
-            return "Pick a voice to delete.", gr.update(), gr.update()
-        p = voice_path(name)
-        if not p.exists():
-            return f"No saved voice called '{name}'.", gr.update(), gr.update()
-        p.unlink()
+            return _bad("Pick a voice to delete."), gr.update(), gr.update(), gr.update(), False
+        if not armed:
+            return ('<div class="tts-note tts-note--warn">Press <strong>Confirm delete</strong> to remove '
+                    f"<strong>{escape(name)}</strong> for good. Its saved clip is deleted too.</div>",
+                    gr.update(), gr.update(), gr.update(value="Confirm delete"), True)
+        delete_voice(name)
+        gr.Info(f"Deleted the voice '{name}'.")
         remaining = list_voices()
-        return (f"Deleted '{name}'.",
-                gr.update(choices=voice_choices()),
-                gr.update(choices=remaining, value=(remaining[0] if remaining else None)))
+        return ("",
+                gr.update(choices=voice_choices(), value="preset:ryan"),
+                gr.update(choices=remaining, value=(remaining[0] if remaining else None)),
+                gr.update(value="Delete voice"), False)
     except Exception as e:  # noqa: BLE001
-        return f"Could not delete: {type(e).__name__}: {e}", gr.update(), gr.update()
+        return _bad(f"Could not delete: {escape(str(e))}"), gr.update(), gr.update(), gr.update(), False
 
 
 def refresh_voice_lists():
     names = list_voices()
     return (gr.update(choices=voice_choices()),
-            gr.update(choices=names, value=(names[0] if names else None)))
+            gr.update(choices=names, value=(names[0] if names else None)),
+            _voices_gallery_html())
 
 
 # ---------------------------------------------------------------------------
@@ -1118,16 +1049,39 @@ def do_refresh_recordings():
 
 
 def do_pick_recording(path):
+    """Returns (player, meta card, download button)."""
     if not path or not Path(path).exists():
-        return None, ""
+        return None, _idle_html("Nothing selected", " Generated reads appear here, newest first."), gr.update(visible=False)
     try:
         info = sf.info(str(path))
-        meta = (f'<div class="tts-note"><strong>{escape(Path(path).name)}</strong><br>'
-                f"{info.duration:.1f} s &middot; {info.samplerate} Hz &middot; {info.subtype}<br>"
-                f"<code>{escape(str(path))}</code></div>")
-        return str(path), meta
+        when = time.strftime("%d %b %Y, %H:%M", time.localtime(Path(path).stat().st_mtime))
+        meta = (f'<div class="tts-vcard"><div class="tts-avatar" style="--h:{_hue(Path(path).stem)}">'
+                f'{_icon("play")}</div><div><h4>{escape(Path(path).name)}</h4>'
+                f"<p>{when}</p><div class=\"tts-tags\">"
+                f'<span class="tts-tag tts-tag--accent">{info.duration:.1f}s</span>'
+                f'<span class="tts-tag">{info.samplerate} Hz</span>'
+                f'<span class="tts-tag">{escape(info.subtype)}</span></div></div></div>')
+        return str(path), meta, gr.update(value=str(path), visible=True)
     except Exception as e:  # noqa: BLE001
-        return None, f'<div class="tts-note tts-note--err">Could not read: {escape(str(e))}</div>'
+        return None, _bad(f"Could not read: {escape(str(e))}"), gr.update(visible=False)
+
+
+def do_delete_recording(path, armed):
+    """Two-step delete of one finished read. Returns (status, list, button, armed)."""
+    if not path or not Path(path).exists():
+        return _bad("Pick a recording first."), gr.update(), gr.update(), False
+    if not armed:
+        return ('<div class="tts-note tts-note--warn">Press <strong>Confirm delete</strong> to remove '
+                f"<strong>{escape(Path(path).name)}</strong>. This can't be undone.</div>",
+                gr.update(), gr.update(value="Confirm delete"), True)
+    try:
+        Path(path).unlink()
+    except OSError as e:
+        return _bad(f"Could not delete: {escape(str(e))}"), gr.update(), gr.update(value="Delete"), False
+    gr.Info(f"Deleted {Path(path).name}.")
+    choices = _recording_choices()
+    return ("", gr.update(choices=choices, value=(choices[0][1] if choices else None)),
+            gr.update(value="Delete"), False)
 
 
 # ---------------------------------------------------------------------------
@@ -1222,124 +1176,211 @@ def do_reset_speed():
 # repairing it. Headings step h1 -> h2 -> h3 without skipping, every control
 # carries a real label, and status is announced politely to screen readers.
 # ---------------------------------------------------------------------------
-DELIVERY_INFO = ("Steady is calmer and more consistent -- best on the small (0.6B) voice. "
+DELIVERY_INFO = ("Steady is calmer and more consistent, best on the small (0.6B) voice. "
                  "Expressive varies more but can wander.")
-TIDY_INFO = ("Spell out numbers, money, dates and symbols; strip markdown; put each sentence "
-             "on its own line and break very long ones. Turn off only if it mispronounces "
-             "something. Pronunciation fixes in lexicon.txt always apply.")
+TIDY_INFO = ("Spell out numbers, money, dates and symbols; strip markdown; one sentence per line. "
+             "Pronunciation fixes in the lexicon always apply.")
+
+# One-click starter scripts. Fictional places and offers, so nothing reads as a
+# real advert or news claim.
+SAMPLE_SCRIPTS = {
+    "Howzit": ("Howzit everyone, and welcome back! It's a lekker sunny morning in Cape Town.\n\n"
+               "The wind has finally calmed down, so grab a koeksister and let's get going."),
+    "Radio spot": ("This weekend only at Harbour Lane Market: everything is up to fifty percent off!\n\n"
+                   "Doors open at 8 a.m. on Saturday. Don't miss it, my bru."),
+    "Story": ("My ouma always said the mountain keeps its secrets. One windy evening in the Bo-Kaap, "
+              "I finally understood what she meant."),
+    "Announcement": ("Good afternoon, everyone. The 3:15 train to Simon's Town is running about ten "
+                     "minutes late.\n\nThank you for your patience, and enjoy the rest of your day."),
+}
+
+DESIGN_IDEAS = {
+    "Cape Town auntie": "Warm Capetonian auntie in her fifties, kind, lively and a little cheeky, South African English",
+    "Radio DJ": "Young Cape Flats radio DJ, upbeat and fast-talking, full of energy, South African English",
+    "Narrator": "Calm, deep male narrator, measured pace, warm and trustworthy",
+    "Help desk": "Bright young woman, friendly customer-service tone, clear and crisp",
+}
+
+# A passage to read when recording a reference clip: ~15 seconds, varied sounds,
+# a natural Capetonian register. Reading it means the transcript is known.
+READ_PASSAGE = ("Morning everyone! It's a lekker sunny day in Cape Town, and the wind is finally "
+                "taking a break. I'm going to grab a coffee, catch the train into town, and meet my "
+                "friends by the harbour at half past ten. Honestly, there's nowhere else I'd rather be.")
+
+
+def _masthead_html() -> str:
+    return (
+        '<div class="tts-hero">'
+        f"{_hero_art()}"
+        '<div class="tts-hero__brand">'
+        f'<span class="tts-logo">{LOGO_SVG}</span>'
+        f"<div><h1>Skinnerbek <span>Studio</span></h1>"
+        "<p>Natural South African voices, from Cape Flats to Constantia. Write a script, pick a "
+        "voice, press Speak.</p>"
+        '<div class="tts-hero__badges">'
+        f'<span class="tts-badge">{_icon("lock")} Private: runs on this machine</span>'
+        f'<span class="tts-badge">{_icon("wifi_off")} Works offline</span>'
+        "</div></div></div>"
+        '<div class="tts-hero__actions">'
+        f'<button class="tts-iconbtn" type="button" data-skb="theme" title="Switch light / dark" '
+        f'aria-label="Switch light or dark theme">{_icon("moon")}</button>'
+        "</div></div>"
+    )
+
+
+WELCOME_HTML = (
+    '<div class="tts-welcome" role="note">'
+    '<div class="tts-step"><i>1</i><div><b>Write or paste a script</b>'
+    "<span>Or start from a sample. Long text is split into sentences for you.</span></div></div>"
+    '<div class="tts-step"><i>2</i><div><b>Pick a voice</b>'
+    "<span>Clone a real Cape Town voice in the Voice library for an authentic accent.</span></div></div>"
+    '<div class="tts-step"><i>3</i><div><b>Press Speak</b>'
+    "<span>Or <kbd>Ctrl</kbd> + <kbd>Enter</kbd>. Each line renders, then joins into one take.</span></div></div>"
+    '<button class="tts-welcome__x" type="button" data-skb="welcome-close" aria-label="Dismiss">&times;</button>'
+    "</div>"
+)
+
+FOOTER_HTML = (
+    '<div class="tts-foot">'
+    f"<div><b>{APP_NAME}</b> <span>v{APP_VERSION}</span><span>Everything stays on this computer</span></div>"
+    "<div><span>Built on Qwen3-TTS (Apache-2.0)</span><span>Only clone voices you have permission to use</span></div>"
+    "</div>"
+)
+
+# The text box's live counter, computed in the browser so typing never waits on
+# the server. Mirrors the app's own estimate: ~2.6 words a second of speech.
+COUNTER_JS = """(text) => {
+  const t = (text || '').trim();
+  const words = t ? t.split(/\\s+/).length : 0;
+  const sentences = t ? (t.match(/[^.!?\\n]+([.!?]+|$)/g) || []).filter(s => s.trim()).length : 0;
+  const secs = Math.round(words / 2.6);
+  const dur = secs < 60 ? secs + 's' : Math.floor(secs / 60) + 'm ' + String(secs % 60).padStart(2, '0') + 's';
+  const long = words > 400 ? ' class="over"' : '';
+  return `<div class="tts-count"><span><b>${words}</b> words</span><span><b>${sentences}</b> sentences</span>` +
+         `<span${long}>about <b>${dur}</b> of speech${words > 400 ? ' · long reads take a while on CPU' : ''}</span></div>`;
+}"""
+
+
+def _counter_static() -> str:
+    return ('<div class="tts-count"><span><b>0</b> words</span><span><b>0</b> sentences</span>'
+            "<span>about <b>0s</b> of speech</span></div>")
+
+
+WAVEFORM = gr.WaveformOptions(waveform_color="#8d97ad", waveform_progress_color="#ff7a55")
 
 
 def _fix_one_line_block():
     """The 'redo a single line' controls. Returns (dropdown, seed, button, status)."""
     with gr.Accordion("Fix one line", open=False, elem_classes="tts-pane"):
-        gr.Markdown(
-            "Redo just one sentence of the last take -- the rest is kept and the "
-            "read is re-stitched. Change the seed for a different attempt."
-        )
+        gr.HTML('<div class="tts-note">Redo just one sentence of the last take. The rest is kept '
+                "and the read is re-stitched. Change the seed for a different attempt.</div>")
         line = gr.Dropdown(label="Line to redo", choices=[], visible=False)
-        new_seed = gr.Number(label="New seed (optional)", precision=0)
+        new_seed = gr.Number(label="Seed", precision=0, value=0,
+                             info="0 gives a fresh attempt each time. Any other number is repeatable.")
         with gr.Row(elem_classes="tts-actions"):
             btn = gr.Button("Regenerate this line", variant="primary")
         status = gr.Markdown(elem_classes="tts-status")
     return line, new_seed, btn, status
 
 
-def _render_column(label_prefix: str):
+def _render_column(label_prefix: str, button_word: str):
     """Progress -> result -> status -> prepared text -> repair. Returns the parts."""
-    gr.HTML(_sec('Render'))
-    progress = gr.HTML(_idle_html("Ready", " Press Speak and each line will appear here as it renders."))
-    audio = gr.Audio(label=f"{label_prefix} result", type="filepath")
-    status = gr.HTML()
-    with gr.Accordion("Prepared text", open=False, elem_classes="tts-pane"):
-        preview = gr.HTML(_idle_html(
-            "No preview yet",
-            " Press Preview text for the exact lines the model will be given, and a time estimate."))
-    redo_line, redo_seed, redo_btn, redo_status = _fix_one_line_block()
+    with gr.Column(elem_classes=["tts-card", "tts-card--sticky"]):
+        gr.HTML(_title("render", "Your take", "Each line appears here as it renders."))
+        progress = gr.HTML(_idle_html(
+            "Ready when you are", f" Press {button_word} and watch each line render here."))
+        audio = gr.Audio(label=f"{label_prefix} result", type="filepath", elem_classes="tts-player",
+                         waveform_options=WAVEFORM)
+        status = gr.HTML(elem_classes="tts-status")
+        with gr.Accordion("Prepared text", open=False, elem_classes="tts-pane"):
+            preview = gr.HTML(_idle_html(
+                "No preview yet",
+                " Press Preview for the exact lines the model will be given, and a time estimate.",
+                art=False))
+        redo_line, redo_seed, redo_btn, redo_status = _fix_one_line_block()
     return progress, audio, status, preview, redo_line, redo_seed, redo_btn, redo_status
 
 
+def _sample_buttons(target, samples: Dict[str, str]):
+    with gr.Row(elem_classes="tts-samples"):
+        for label, text in samples.items():
+            gr.Button(label, size="sm").click(lambda t=text: t, outputs=[target], queue=False)
+
+
 def build_app() -> gr.Blocks:
-    with gr.Blocks(title="Qwen3-TTS Studio") as demo:
+    with gr.Blocks(title=APP_NAME) as demo:
         with gr.Column(elem_classes="tts-head"):
-            gr.HTML(
-                '<div class="tts-head__lead">'
-                "<h1>Qwen3-TTS Studio</h1>"
-                "<p>Local text to speech. Nothing leaves this machine &mdash; the model runs on "
-                "the CPU here, so a read takes minutes rather than seconds.</p>"
-                "</div>"
-            )
+            gr.HTML(_masthead_html())
             sysbar = gr.HTML(_system_html())
 
-        with gr.Tabs():
+        with gr.Tabs(elem_classes="tts-tabs") as tabs:
             # ================= Speak =================
-            with gr.Tab("Speak"):
+            with gr.Tab("Speak", id="speak"):
                 speak_state = gr.State(None)
-                gr.HTML(
-                    '<div class="tts-note tts-lead">Turn a script into speech with a built-in '
-                    "or a saved voice. Long text is split into one line per sentence "
-                    "automatically; each line is rendered on its own and the takes are "
-                    "stitched together.</div>"
-                )
+                gr.HTML(WELCOME_HTML)
                 with gr.Row(equal_height=False, elem_classes="tts-split"):
                     with gr.Column(scale=3, elem_classes="tts-col"):
-                        gr.HTML(_sec('Script'))
-                        script = gr.Textbox(
-                            label="What should be said",
-                            lines=10,
-                            placeholder=(
-                                "Type or paste what the voice should say.\n\n"
-                                "Long text is split into one sentence per line automatically; "
-                                "you can also put each line where you want it. Blank lines start "
-                                "a new paragraph; lines starting with # are skipped."
-                            ),
-                        )
-                        gr.HTML(_sec('Voice'))
-                        voice = gr.Dropdown(
-                            label="Voice",
-                            choices=voice_choices(),
-                            value="preset:ryan",
-                            info=PRESET_NOTE,
-                        )
-                        with gr.Row(elem_classes="tts-actions"):
-                            speak_btn = gr.Button("Speak", variant="primary", scale=3)
-                            stop_btn = gr.Button("Stop", variant="stop", scale=1)
-                            preview_btn = gr.Button("Preview text", scale=1)
-                            refresh_btn = gr.Button("Refresh voices", scale=1)
+                        with gr.Column(elem_classes="tts-card"):
+                            gr.HTML(_title("script", "Script", "What should be said. Try a sample to get going."))
+                            script = gr.Textbox(
+                                label="Script", show_label=False, lines=9, max_lines=30,
+                                placeholder=(
+                                    "Type or paste what the voice should say…\n\n"
+                                    "Long text is split into one sentence per line automatically. "
+                                    "A blank line starts a new paragraph; lines starting with # are skipped."
+                                ),
+                            )
+                            counter = gr.HTML(_counter_static())
+                            _sample_buttons(script, SAMPLE_SCRIPTS)
 
-                        delivery = gr.Radio(
-                            ["Steady", "Natural", "Expressive"], value="Steady",
-                            label="Delivery", info=DELIVERY_INFO,
-                        )
-                        tidy = gr.Checkbox(value=True, label="Tidy the text before speaking",
-                                           info=TIDY_INFO)
-
-                        with gr.Accordion("Advanced settings", open=False, elem_classes="tts-pane"):
-                            size = gr.Radio(
-                                ["0.6B", "1.7B"], value="0.6B", label="Model size",
-                                info="0.6B is faster and lighter. 1.7B is slower and needs "
-                                     "~3.8 GB free RAM, but is needed for the style instruction "
-                                     "below. Saved voices use whatever size they were made with.",
-                            )
-                            language = gr.Dropdown(LANGUAGES, value="Auto", label="Language",
-                                                   info="Auto detects it from the text.")
-                            instruct = gr.Textbox(
-                                label="Style instruction (built-in voices, 1.7B only)",
-                                placeholder="e.g. Speak slowly and warmly", lines=2,
-                            )
-                            gap_ms = gr.Slider(0, 1500, value=300, step=50,
-                                               label="Gap between sentences (ms)")
-                            para_gap = gr.Slider(0, 2000, value=650, step=50,
-                                                 label="Gap between paragraphs (ms)",
-                                                 info="A blank line in your script starts a new paragraph.")
-                            seed = gr.Number(
-                                label="Seed (optional)", precision=0,
-                                info="Set a number to make a take repeatable. Leave blank for a "
-                                     "fresh take each time.",
-                            )
+                        with gr.Column(elem_classes="tts-card"):
+                            gr.HTML(_title("voice", "Voice", "Built-in speakers, plus every voice you've cloned."))
+                            with gr.Row(equal_height=False, elem_classes="tts-pickrow"):
+                                voice = gr.Dropdown(label="Voice", choices=voice_choices(),
+                                                    value="preset:ryan", scale=5)
+                                refresh_btn = gr.Button("↻", scale=0, min_width=48,
+                                                        elem_classes="tts-pill")
+                            voice_card = gr.HTML(_voice_card_html("preset:ryan"))
+                            delivery = gr.Radio(["Steady", "Natural", "Expressive"], value="Steady",
+                                                label="Delivery", info=DELIVERY_INFO,
+                                                elem_classes="tts-seg")
+                            tidy = gr.Checkbox(value=True, label="Tidy the text before speaking",
+                                               info=TIDY_INFO)
+                            with gr.Accordion("Advanced settings", open=False, elem_classes="tts-pane"):
+                                size = gr.Radio(
+                                    ["0.6B", "1.7B"], value="0.6B", label="Model size", elem_classes="tts-seg",
+                                    info="0.6B is faster and lighter. 1.7B needs ~3.8 GB free RAM but "
+                                         "enables the style instruction. Saved voices use their own size.",
+                                )
+                                language = gr.Dropdown(LANGUAGES, value="Auto", label="Language",
+                                                       info="Auto detects it from the text.")
+                                instruct = gr.Textbox(
+                                    label="Style instruction (built-in voices, 1.7B only)",
+                                    placeholder="e.g. Speak slowly and warmly", lines=2,
+                                )
+                                with gr.Row():
+                                    gap_ms = gr.Slider(0, 1500, value=300, step=50,
+                                                       label="Pause between sentences (ms)")
+                                    para_gap = gr.Slider(0, 2000, value=650, step=50,
+                                                         label="Pause between paragraphs (ms)")
+                                seed = gr.Number(
+                                    label="Seed", precision=0, value=0,
+                                    info="0 gives a fresh take each time. Any other number makes a take repeatable.",
+                                )
+                            with gr.Row(elem_classes="tts-actions"):
+                                speak_btn = gr.Button("Speak", variant="primary", scale=4,
+                                                      elem_id="tts-speak-btn", elem_classes="tts-go")
+                                preview_btn = gr.Button("Preview", scale=1, variant="secondary")
+                                stop_btn = gr.Button("Stop", variant="stop", scale=1)
+                            gr.HTML('<div class="tts-hint">Tip: <kbd>Ctrl</kbd> + <kbd>Enter</kbd> '
+                                    "speaks from anywhere on this tab</div>")
                     with gr.Column(scale=2, elem_classes="tts-col"):
                         (s_prog, audio, status, preview_md,
-                         redo_line, redo_seed, redo_btn, redo_status) = _render_column("Speak")
+                         redo_line, redo_seed, redo_btn, redo_status) = _render_column("Speak", "Speak")
 
+                script.input(None, inputs=[script], outputs=[counter], js=COUNTER_JS)
+                script.change(None, inputs=[script], outputs=[counter], js=COUNTER_JS)
+                voice.change(_voice_card_html, inputs=[voice], outputs=[voice_card], queue=False)
                 speak_btn.click(
                     do_speak,
                     inputs=[voice, script, size, language, instruct, delivery, tidy,
@@ -1354,45 +1395,50 @@ def build_app() -> gr.Blocks:
                 redo_btn.click(do_regen_line, inputs=[speak_state, redo_line, redo_seed],
                                outputs=[audio, redo_status, speak_state])
 
-            # ================= Describe a voice =================
-            with gr.Tab("Describe a voice"):
+            # ================= Design a voice =================
+            with gr.Tab("Design a voice", id="design"):
                 d_state = gr.State(None)
-                gr.HTML(
-                    '<div class="tts-note tts-lead"><strong>Invent a voice from a description.</strong> '
-                    "This uses the VoiceDesign model, which is published only at 1.7B &mdash; the "
-                    "slowest to load and run, and it needs about 3.8&nbsp;GB of free RAM.</div>"
-                )
                 with gr.Row(equal_height=False, elem_classes="tts-split"):
                     with gr.Column(scale=3, elem_classes="tts-col"):
-                        gr.HTML(_sec('The voice'))
-                        d_desc = gr.Textbox(
-                            label="Describe the voice", lines=3,
-                            placeholder="e.g. Warm older man, gentle and unhurried, slight gravel",
-                        )
-                        gr.HTML(_sec('Script'))
-                        d_script = gr.Textbox(
-                            label="What should be said", lines=8,
-                            placeholder="What should this voice say? One sentence per line.",
-                        )
-                        with gr.Row(elem_classes="tts-actions"):
-                            d_btn = gr.Button("Generate", variant="primary", scale=3)
-                            d_stop = gr.Button("Stop", variant="stop", scale=1)
-                            d_preview_btn = gr.Button("Preview text", scale=1)
-                        d_delivery = gr.Radio(["Steady", "Natural", "Expressive"], value="Steady",
-                                              label="Delivery", info=DELIVERY_INFO)
-                        d_tidy = gr.Checkbox(value=True, label="Tidy the text before speaking",
-                                             info=TIDY_INFO)
-                        with gr.Accordion("Advanced settings", open=False, elem_classes="tts-pane"):
-                            d_language = gr.Dropdown(LANGUAGES, value="Auto", label="Language")
-                            d_gap = gr.Slider(0, 1500, value=300, step=50,
-                                              label="Gap between sentences (ms)")
-                            d_para_gap = gr.Slider(0, 2000, value=650, step=50,
-                                                   label="Gap between paragraphs (ms)")
-                            d_seed = gr.Number(label="Seed (optional)", precision=0)
+                        with gr.Column(elem_classes="tts-card"):
+                            gr.HTML(_title("spark", "Describe a voice",
+                                           "Invent a new voice from words. Uses the 1.7B VoiceDesign model: "
+                                           "the slowest, and it needs ~3.8&nbsp;GB of free RAM."))
+                            d_desc = gr.Textbox(
+                                label="The voice", lines=3,
+                                placeholder="e.g. Warm older man, gentle and unhurried, slight gravel",
+                            )
+                            _sample_buttons(d_desc, DESIGN_IDEAS)
+                        with gr.Column(elem_classes="tts-card"):
+                            gr.HTML(_title("script", "Script", "What this voice should say."))
+                            d_script = gr.Textbox(label="Script", show_label=False, lines=7,
+                                                  placeholder="What should this voice say?")
+                            d_counter = gr.HTML(_counter_static())
+                            _sample_buttons(d_script, SAMPLE_SCRIPTS)
+                            d_delivery = gr.Radio(["Steady", "Natural", "Expressive"], value="Steady",
+                                                  label="Delivery", info=DELIVERY_INFO, elem_classes="tts-seg")
+                            d_tidy = gr.Checkbox(value=True, label="Tidy the text before speaking",
+                                                 info=TIDY_INFO)
+                            with gr.Accordion("Advanced settings", open=False, elem_classes="tts-pane"):
+                                d_language = gr.Dropdown(LANGUAGES, value="Auto", label="Language")
+                                with gr.Row():
+                                    d_gap = gr.Slider(0, 1500, value=300, step=50,
+                                                      label="Pause between sentences (ms)")
+                                    d_para_gap = gr.Slider(0, 2000, value=650, step=50,
+                                                           label="Pause between paragraphs (ms)")
+                                d_seed = gr.Number(label="Seed", precision=0, value=0,
+                                                   info="0 gives a fresh take each time.")
+                            with gr.Row(elem_classes="tts-actions"):
+                                d_btn = gr.Button("Generate", variant="primary", scale=4,
+                                                  elem_id="tts-design-btn", elem_classes="tts-go")
+                                d_preview_btn = gr.Button("Preview", scale=1, variant="secondary")
+                                d_stop = gr.Button("Stop", variant="stop", scale=1)
                     with gr.Column(scale=2, elem_classes="tts-col"):
                         (d_prog, d_audio, d_status, d_preview_md,
-                         d_redo_line, d_redo_seed, d_redo_btn, d_redo_status) = _render_column("Design")
+                         d_redo_line, d_redo_seed, d_redo_btn, d_redo_status) = _render_column("Design", "Generate")
 
+                d_script.input(None, inputs=[d_script], outputs=[d_counter], js=COUNTER_JS)
+                d_script.change(None, inputs=[d_script], outputs=[d_counter], js=COUNTER_JS)
                 d_btn.click(
                     do_design,
                     inputs=[d_desc, d_script, d_language, d_delivery, d_tidy,
@@ -1405,123 +1451,152 @@ def build_app() -> gr.Blocks:
                 d_redo_btn.click(do_regen_line, inputs=[d_state, d_redo_line, d_redo_seed],
                                  outputs=[d_audio, d_redo_status, d_state])
 
-            # ================= Voices =================
-            with gr.Tab("Voices"):
-                gr.HTML(
-                    '<div class="tts-note tts-lead">Turn a real recording into a reusable voice. Do this '
-                    "once per clip; afterwards the voice appears in the <strong>Speak</strong> "
-                    "tab's voice list. Use recordings you have the right to use.</div>"
-                )
+            # ================= Voice library =================
+            with gr.Tab("Voice library", id="voices") as voices_tab:
                 with gr.Row(equal_height=False, elem_classes="tts-split"):
                     with gr.Column(scale=3, elem_classes="tts-col"):
-                        gr.HTML(_sec('Add a voice'))
-                        a_name = gr.Textbox(label="Name for this voice", placeholder="e.g. my_narrator")
-                        a_audio = gr.Audio(
-                            label="Reference recording (5-30 seconds of clear speech)",
-                            type="filepath", sources=["upload", "microphone"],
-                        )
-                        a_text = gr.Textbox(
-                            label="Transcript of the recording (word for word)", lines=3,
-                            placeholder="Type exactly what is said in the clip.",
-                        )
-                        a_xvec = gr.Checkbox(
-                            label="Timbre only -- skip the transcript (faster to set up, lower quality)",
-                            value=False,
-                        )
-                        a_size = gr.Radio(
-                            ["0.6B", "1.7B"], value="0.6B", label="Model size",
-                            info="The voice is tied to the size that made it. 1.7B needs ~3.8 GB free RAM.",
-                        )
-                        with gr.Row(elem_classes="tts-actions"):
-                            a_btn = gr.Button("Save this voice", variant="primary")
-                        a_status = gr.Markdown(elem_classes="tts-status")
+                        with gr.Column(elem_classes="tts-card"):
+                            gr.HTML(_title("mic", "Clone a voice",
+                                           "Record or upload 10&ndash;20 seconds of clear speech. Only use "
+                                           "voices you have the speaker's permission to clone."))
+                            gr.HTML(_sec("Name it", 3, 1))
+                            a_name = gr.Textbox(label="Voice name", placeholder="e.g. auntie_faiza",
+                                                show_label=False)
+                            gr.HTML(_sec("Record or upload a clip", 3, 2))
+                            gr.HTML('<div class="tts-readme"><small>Read this aloud</small>'
+                                    f"<q>{escape(READ_PASSAGE)}</q></div>")
+                            recorder = gr.HTML(value="", html_template='<div class="tts-rec"></div>',
+                                               js_on_load=RECORDER_JS, elem_classes="tts-recorder")
+                            a_audio = gr.Audio(
+                                label="Reference clip (record above, or drop a file here)",
+                                type="filepath", sources=["upload"], elem_classes="tts-player",
+                                waveform_options=WAVEFORM,
+                            )
+                            a_report = gr.HTML()
+                            gr.HTML(_sec("Transcript", 3, 3))
+                            a_text = gr.Textbox(
+                                label="Exactly what is said in the clip", lines=3,
+                                placeholder="Type exactly what is said in the clip, word for word.",
+                            )
+                            use_passage = gr.Button("I read the passage above", size="sm",
+                                                    elem_classes="tts-pill")
+                            gr.HTML(_sec("Save", 3, 4))
+                            with gr.Row():
+                                a_size = gr.Radio(
+                                    ["0.6B", "1.7B"], value="0.6B", label="Model size", elem_classes="tts-seg",
+                                    info="A voice is tied to the size that made it. 1.7B needs ~3.8 GB free RAM.",
+                                )
+                                a_xvec = gr.Checkbox(
+                                    label="Timbre only (skip the transcript: quicker, lower quality)",
+                                    value=False,
+                                )
+                            with gr.Row(elem_classes="tts-actions"):
+                                a_btn = gr.Button("Save this voice", variant="primary", elem_classes="tts-go")
+                            a_status = gr.HTML(elem_classes="tts-status")
                     with gr.Column(scale=2, elem_classes="tts-col"):
-                        gr.HTML(_sec('Saved voices'))
-                        d_list = gr.Dropdown(
-                            label="Delete a voice", choices=list_voices(),
-                            value=(list_voices()[0] if list_voices() else None),
-                        )
-                        with gr.Row(elem_classes="tts-actions"):
-                            del_btn = gr.Button("Delete selected voice", variant="stop")
-                        del_status = gr.Markdown(elem_classes="tts-status")
+                        with gr.Column(elem_classes="tts-card"):
+                            gr.HTML(_title("grid", "Your voices", "Everything you've cloned."))
+                            gallery = gr.HTML(_voices_gallery_html())
+                        with gr.Column(elem_classes="tts-card"):
+                            gr.HTML(_title("play", "Manage a voice", "Hear the clip it was made from, use it, or remove it."))
+                            v_pick = gr.Dropdown(label="Voice", choices=list_voices(),
+                                                 value=(list_voices()[0] if list_voices() else None))
+                            v_card = gr.HTML()
+                            v_audio = gr.Audio(label="Reference clip", type="filepath", interactive=False,
+                                               elem_classes="tts-player", waveform_options=WAVEFORM)
+                            with gr.Row(elem_classes="tts-actions"):
+                                v_use = gr.Button("Use in Speak", variant="primary")
+                                v_del = gr.Button("Delete voice", variant="stop")
+                            v_armed = gr.State(False)
+                            v_status = gr.HTML(elem_classes="tts-status")
 
+                recorder.change(lambda p: p or gr.update(), inputs=[recorder], outputs=[a_audio])
+                a_audio.change(_clip_report_html, inputs=[a_audio], outputs=[a_report])
+                use_passage.click(lambda: READ_PASSAGE, outputs=[a_text], queue=False)
                 a_btn.click(do_add_voice, inputs=[a_name, a_audio, a_text, a_xvec, a_size],
-                            outputs=[a_status, voice]).then(refresh_voice_lists,
-                                                            outputs=[voice, d_list])
-                del_btn.click(do_delete_voice, inputs=[d_list],
-                              outputs=[del_status, voice, d_list])
+                            outputs=[a_status, voice, gallery, v_pick])
+                v_pick.change(do_pick_voice, inputs=[v_pick], outputs=[v_audio, v_card]).then(
+                    lambda: (False, gr.update(value="Delete voice"), ""), outputs=[v_armed, v_del, v_status])
+                v_use.click(lambda n: (gr.update(value=f"voice:{n}") if n else gr.update(),
+                                       gr.Tabs(selected="speak")),
+                            inputs=[v_pick], outputs=[voice, tabs])
+                v_del.click(do_delete_voice, inputs=[v_pick, v_armed],
+                            outputs=[v_status, voice, v_pick, v_del, v_armed]).then(
+                    lambda: _voices_gallery_html(), outputs=[gallery])
 
             # ================= Recordings =================
-            with gr.Tab("Recordings"):
-                gr.HTML(
-                    '<div class="tts-note tts-lead">Everything generated so far, newest first. Pick one '
-                    "to play it, or use the player's download button to save a copy.</div>"
-                )
+            with gr.Tab("Recordings", id="recordings") as rec_tab:
                 with gr.Row(equal_height=False, elem_classes="tts-split"):
                     with gr.Column(scale=3, elem_classes="tts-col"):
-                        gr.HTML(_sec('Library'))
-                        rec_list = gr.Dropdown(label="Recording", choices=_recording_choices(),
-                                               value=None)
-                        with gr.Row(elem_classes="tts-actions"):
-                            rec_refresh = gr.Button("Refresh list")
-                        rec_meta = gr.HTML()
+                        with gr.Column(elem_classes="tts-card"):
+                            gr.HTML(_title("history", "Recordings", "Everything you've generated, newest first."))
+                            with gr.Row(equal_height=False, elem_classes="tts-pickrow"):
+                                rec_list = gr.Dropdown(label="Recording", choices=_recording_choices(),
+                                                       value=None, scale=5)
+                                rec_refresh = gr.Button("↻", scale=0, min_width=48, elem_classes="tts-pill")
+                            rec_meta = gr.HTML()
                     with gr.Column(scale=2, elem_classes="tts-col"):
-                        gr.HTML(_sec('Playback'))
-                        rec_audio = gr.Audio(label="Selected recording", type="filepath")
+                        with gr.Column(elem_classes="tts-card"):
+                            gr.HTML(_title("play", "Playback"))
+                            rec_audio = gr.Audio(label="Selected recording", type="filepath",
+                                                 interactive=False, elem_classes="tts-player",
+                                                 waveform_options=WAVEFORM)
+                            with gr.Row(elem_classes="tts-actions"):
+                                rec_dl = gr.DownloadButton("Download", variant="primary", visible=False)
+                                rec_del = gr.Button("Delete", variant="stop")
+                            rec_armed = gr.State(False)
+                            rec_status = gr.HTML(elem_classes="tts-status")
 
-                rec_list.change(do_pick_recording, inputs=[rec_list], outputs=[rec_audio, rec_meta])
-                rec_refresh.click(do_refresh_recordings, outputs=[rec_list]).then(
-                    do_pick_recording, inputs=[rec_list], outputs=[rec_audio, rec_meta])
+                rec_list.change(do_pick_recording, inputs=[rec_list],
+                                outputs=[rec_audio, rec_meta, rec_dl]).then(
+                    lambda: (False, gr.update(value="Delete"), ""), outputs=[rec_armed, rec_del, rec_status])
+                rec_refresh.click(do_refresh_recordings, outputs=[rec_list])
+                rec_del.click(do_delete_recording, inputs=[rec_list, rec_armed],
+                              outputs=[rec_status, rec_list, rec_del, rec_armed])
 
             # ================= Settings =================
-            with gr.Tab("Settings"):
-                gr.HTML(
-                    '<div class="tts-note tts-lead">The machine readout and speed '
-                    "calibration, restoring an earlier take, the pronunciation lexicon, and "
-                    "cleanup of leftover per-line audio.</div>"
-                )
+            with gr.Tab("Settings", id="settings") as settings_tab:
                 with gr.Row(equal_height=False, elem_classes="tts-split"):
                     with gr.Column(elem_classes="tts-col"):
-                        gr.HTML(_sec('This machine'))
-                        sys_detail = gr.HTML(_system_detail_html())
-                        with gr.Row(elem_classes="tts-actions"):
-                            sys_btn = gr.Button("Re-check")
-                            speed_btn = gr.Button("Reset speed calibration")
-                        speed_status = gr.HTML(elem_classes="tts-status")
+                        with gr.Column(elem_classes="tts-card"):
+                            gr.HTML(_title("chip", "This machine", "What the app has to work with, and how fast it runs."))
+                            sys_detail = gr.HTML(_system_detail_html())
+                            with gr.Row(elem_classes="tts-actions"):
+                                sys_btn = gr.Button("Re-check", variant="secondary")
+                                speed_btn = gr.Button("Reset speed calibration", variant="secondary")
+                            speed_status = gr.HTML(elem_classes="tts-status")
 
-                        gr.HTML(_sec('Restore an earlier take')
-                                + '<div class="tts-note tts-lead">A take is restorable while its per-line '
-                                "audio is still on disk. Restoring one lets you redo a single "
-                                "line of it from the Speak tab, even after a restart.</div>")
-                        sess_list = gr.Dropdown(label="Saved takes", choices=_session_choices(),
-                                                value=None)
-                        with gr.Row(elem_classes="tts-actions"):
-                            sess_refresh = gr.Button("Refresh")
-                            sess_restore = gr.Button("Restore into Speak", variant="primary")
-                        sess_status = gr.HTML(elem_classes="tts-status")
+                        with gr.Column(elem_classes="tts-card"):
+                            gr.HTML(_title("history", "Restore an earlier take",
+                                           "Bring a finished read back so you can redo a single line, even "
+                                           "after a restart."))
+                            sess_list = gr.Dropdown(label="Saved takes", choices=_session_choices(), value=None)
+                            with gr.Row(elem_classes="tts-actions"):
+                                sess_refresh = gr.Button("Refresh", variant="secondary")
+                                sess_restore = gr.Button("Restore into Speak", variant="primary")
+                            sess_status = gr.HTML(elem_classes="tts-status")
 
                     with gr.Column(elem_classes="tts-col"):
-                        gr.HTML(_sec('Pronunciation lexicon')
-                                + '<div class="tts-note tts-lead">One rule per line: '
-                                "<code>pattern -&gt; replacement</code>. Wrap the pattern in "
-                                "<code>/slashes/</code> for a regex. Applied before numbers and "
-                                "abbreviations, and even when &ldquo;Tidy the text&rdquo; is off. "
-                                "Saved rules apply to the next generation with no restart.</div>")
-                        lex_box = gr.Textbox(label="lexicon.txt", lines=14,
-                                             value=do_load_lexicon())
-                        with gr.Row(elem_classes="tts-actions"):
-                            lex_reload = gr.Button("Reload from disk")
-                            lex_save = gr.Button("Save lexicon", variant="primary")
-                        lex_status = gr.HTML(elem_classes="tts-status")
+                        with gr.Column(elem_classes="tts-card"):
+                            gr.HTML(_title("book", "Pronunciation lexicon",
+                                           "One rule per line: <code>pattern -&gt; replacement</code>. Wrap "
+                                           "the pattern in <code>/slashes/</code> for a regex. Applies from "
+                                           "the next generation, no restart."))
+                            lex_box = gr.Code(label="lexicon.txt", lines=14, value=do_load_lexicon(),
+                                              language=None, interactive=True)
+                            with gr.Row(elem_classes="tts-actions"):
+                                lex_reload = gr.Button("Reload from disk", variant="secondary")
+                                lex_save = gr.Button("Save lexicon", variant="primary")
+                            lex_status = gr.HTML(elem_classes="tts-status")
 
-                        gr.HTML(_sec('Housekeeping')
-                                + '<div class="tts-note tts-lead">A cancelled or crashed run leaves per-line '
-                                "audio behind. This removes only files older than 24 hours that no "
-                                "restorable take refers to.</div>")
-                        with gr.Row(elem_classes="tts-actions"):
-                            clean_dry = gr.Button("Preview cleanup")
-                            clean_btn = gr.Button("Clean up now", variant="stop")
-                        clean_status = gr.HTML(elem_classes="tts-status")
+                        with gr.Column(elem_classes="tts-card"):
+                            gr.HTML(_title("broom", "Housekeeping",
+                                           "A stopped or crashed run leaves per-line audio behind. This removes "
+                                           "only files older than 24 hours that no restorable take uses."))
+                            with gr.Row(elem_classes="tts-actions"):
+                                clean_dry = gr.Button("Preview cleanup", variant="secondary")
+                                clean_btn = gr.Button("Clean up now", variant="stop")
+                            clean_status = gr.HTML(elem_classes="tts-status")
 
                 sys_btn.click(do_system_detail_refresh, outputs=[sys_detail]).then(
                     do_system_refresh, outputs=[sysbar])
@@ -1537,15 +1612,58 @@ def build_app() -> gr.Blocks:
                 clean_btn.click(lambda: do_cleanup(dry_run=False), outputs=[clean_status]).then(
                     do_refresh_sessions, outputs=[sess_list])
 
-        refresh_btn.click(lambda: gr.update(choices=voice_choices()), outputs=[voice])
+        gr.HTML(FOOTER_HTML)
+
+        refresh_btn.click(refresh_voice_lists, outputs=[voice, v_pick, gallery])
         demo.load(do_system_refresh, outputs=[sysbar])
-        # .then so the newest recording is actually loaded into the player, not
-        # just selected in the dropdown.
-        demo.load(do_refresh_recordings, outputs=[rec_list]).then(
-            do_pick_recording, inputs=[rec_list], outputs=[rec_audio, rec_meta])
-        demo.load(do_refresh_sessions, outputs=[sess_list])
+        # Hidden tabs mount lazily in Gradio 6: an event that targets one of
+        # their components before it exists leaves it stuck on "pending". So
+        # each tab fills itself when it is opened, which also keeps it fresh.
+        voices_tab.select(refresh_voice_lists, outputs=[voice, v_pick, gallery]).then(
+            do_pick_voice, inputs=[v_pick], outputs=[v_audio, v_card])
+        rec_tab.select(do_refresh_recordings, outputs=[rec_list]).then(
+            do_pick_recording, inputs=[rec_list], outputs=[rec_audio, rec_meta, rec_dl])
+        settings_tab.select(do_refresh_sessions, outputs=[sess_list]).then(
+            do_system_detail_refresh, outputs=[sys_detail])
 
     return demo
+
+
+THEME = gr.themes.Soft(
+    primary_hue=gr.themes.Color(
+        name="coral", c50="#fff3f1", c100="#ffe3de", c200="#ffc6bc", c300="#ffa192",
+        c400="#ff7d6b", c500="#ff6b5a", c600="#e8503f", c700="#c23d2f", c800="#9c3026",
+        c900="#7a261f", c950="#4a1611"),
+    secondary_hue="amber",
+    neutral_hue=gr.themes.Color(
+        name="ink", c50="#f6f3ef", c100="#eee8e1", c200="#e4ddd4", c300="#c9c3bb",
+        c400="#8d97ad", c500="#5d6578", c600="#3a445c", c700="#253048", c800="#151c2d",
+        c900="#111725", c950="#0a0e18"),
+    font=[gr.themes.GoogleFont("Plus Jakarta Sans"), "Segoe UI", "system-ui", "sans-serif"],
+    font_mono=[gr.themes.GoogleFont("JetBrains Mono"), "Consolas", "ui-monospace", "monospace"],
+    radius_size="lg",
+).set(
+    body_background_fill="#f6f3ef",
+    body_background_fill_dark="#0a0e18",
+    block_background_fill="#ffffff",
+    block_background_fill_dark="#111725",
+    block_border_color="#e4ddd4",
+    block_border_color_dark="#253048",
+    input_background_fill="#fbf9f6",
+    input_background_fill_dark="#0f1522",
+    input_border_color="#e4ddd4",
+    input_border_color_dark="#253048",
+    block_label_background_fill="transparent",
+    block_label_background_fill_dark="transparent",
+    block_label_text_color="#555d70",
+    block_label_text_color_dark="#a7b0c4",
+    block_title_text_color="#171a26",
+    block_title_text_color_dark="#eef1f8",
+    checkbox_background_color_selected="#ff6b5a",
+    checkbox_background_color_selected_dark="#ff6b5a",
+    slider_color="#ff6b5a",
+    slider_color_dark="#ff8a78",
+)
 
 
 def main() -> int:
@@ -1570,6 +1688,9 @@ def main() -> int:
                         help="Weight dtype. auto picks float32 unless the CPU has hardware "
                              "bfloat16 and RAM is tight (see common.resolve_dtype)")
     parser.add_argument("--no-browser", action="store_true", help="Don't open a browser tab on start")
+    parser.add_argument("--mock", action="store_true",
+                        help="Development aid: replace the model with a fast stand-in that returns tones, "
+                             "so every screen can be exercised without loading a checkpoint")
     args = parser.parse_args()
 
     CFG.device = args.device
@@ -1578,30 +1699,32 @@ def main() -> int:
     CFG.chunk_size = args.chunk_size
     CFG.threads = args.threads
     CFG.dtype = args.dtype
+    CFG.mock = args.mock
     VOICES_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print(f"Serving on http://{args.host}:{args.port}  (device: {args.device}"
           f"{', offline' if args.offline else ''}"
           f"{', low-memory' if (args.low_memory or auto_low_memory()) else ''}"
-          f"{', chunked' if args.chunk_size == 1 else f', chunk={args.chunk_size}'})",
+          f"{', chunked' if args.chunk_size == 1 else f', chunk={args.chunk_size}'}"
+          f"{', MOCK MODEL' if args.mock else ''})",
           file=sys.stderr)
     print("First generation of each kind loads its model -- minutes on CPU. Be patient.",
           file=sys.stderr)
 
     build_app().launch(
-        # Gradio 6 takes css/theme here, not in the Blocks constructor. Soft gives
-        # the base components rounded corners and real elevation; CSS above layers
-        # this project's own tokens on top.
+        # Gradio 6 takes css/theme/js here, not in the Blocks constructor.
         css=CSS,
-        theme=gr.themes.Soft(primary_hue="blue", neutral_hue="slate"),
+        theme=THEME,
+        head=f"<script>{STUDIO_JS}</script>",
+        favicon_path=str(ASSETS_DIR / "favicon.svg"),
         server_name=args.host,
         server_port=args.port,
         share=args.share,
         inbrowser=not args.no_browser,
-        # output/ lives outside the launch dir, so the player can't read a take
-        # without this.
-        allowed_paths=[str(OUTPUT_DIR)],
+        # output/, voices/ and samples/ live outside the launch dir, so the players can't
+        # read a take or a reference clip without this.
+        allowed_paths=[str(OUTPUT_DIR), str(VOICES_DIR), str(SAMPLES_DIR)],
     )
     return 0
 
