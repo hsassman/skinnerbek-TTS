@@ -1,3 +1,5 @@
+<img src="assets/icon-256.png" alt="" width="88" align="right">
+
 # Skinnerbek TTS
 
 Skinnerbek TTS is a local text-to-speech toolkit for **South African English with a Cape Flats /
@@ -23,9 +25,12 @@ Fine-tuning a dedicated accent model is the next stage (see [Status and roadmap]
   acronyms the model gets wrong. The web app reloads it live.
 - **Delivery presets** (steady / natural / expressive) and reproducible seeds.
 - **Loudness mastering** to −16 LUFS, so separate takes match in volume.
-- **Web app.** Speak, Describe a voice, Voice library, Recordings and Settings tabs. It shows
-  live per-line progress with an ETA, can stop safely between lines, and has "Fix one line"
-  repair. Finished takes can be restored after a restart.
+- **Web app (Skinnerbek Studio).** Speak, Design a voice, Voice library, Recordings and Settings
+  tabs, in light and dark themes. It shows live per-line progress with an ETA, can stop safely
+  between lines, and has "Fix one line" repair. Finished takes can be restored after a restart.
+- **Record a voice in the browser.** A guided recorder with a read-aloud passage, live level
+  meter and target-length timer. Every clip gets a quality report (length, silence, clipping,
+  loudness) before it becomes a voice.
 - **Runs on modest hardware.** It works CPU-only and picks a memory-aware precision
   automatically. A preflight check refuses to load a model that won't fit in RAM, instead of
   letting it crash mid-load.
@@ -130,7 +135,11 @@ scripts/
   session.py             persists finished takes so they can be repaired after a restart
   launch_ui.py           launches app.py, or the bundled qwen_tts demo
   feature_tour.py        narrated smoke test of the read-quality features
-tests/                   pytest suite (85 tests, no model download needed)
+  refclip.py             reference-clip quality report and clean-up
+  mock_model.py          fast stand-in model for `app.py --mock` (UI development)
+  ui/                    studio.css, studio.js, recorder.js: the web app's styles and browser code
+assets/                  logo, favicon, masthead banner, empty-state illustration
+tests/                   pytest suite (91 tests, no model download needed)
 lexicon.txt              pronunciation overrides
 samples/quick_test.txt   short script for smoke-testing an install
 samples/ voices/ output/ local-only: reference clips, voice fingerprints, generated audio (gitignored)
@@ -151,7 +160,7 @@ samples/ voices/ output/ local-only: reference clips, voice fingerprints, genera
 - Done: cloning with the 0.6B Base model keeps the Cape Flats accent, judged by ear against a
   real reference speaker.
 - Done: text prep, the voice library, the web app with line-level repair, and loudness
-  mastering. All 85 unit tests pass.
+  mastering. All 91 unit tests pass.
 - Known limitation: 0.6B clones come out consistently about 20 Hz higher in pitch than the
   reference.
 - Next: evaluate the 1.7B models on a 32 GB machine. This is the expected fix for the pitch
@@ -453,8 +462,64 @@ it or the delivery preset.
 
 ### Web UI
 
-The app has five tabs: **Speak**, **Describe a voice**, **Voices**, **Recordings** and
-**Settings**.
+`scripts/app.py` is **Skinnerbek Studio**, the browser app. Start here:
+
+```powershell
+python app.py                 # http://127.0.0.1:7860, opens your browser
+python app.py --offline       # skip Hugging Face network checks (see Gotchas)
+python app.py --port 8000 --share
+python app.py --mock          # development: a fast stand-in model, no checkpoint loaded
+```
+
+`python launch_ui.py` with no argument launches the same app. It has a light and a dark theme
+(toggle at the top right, remembered per browser), and **Ctrl+Enter** renders from the Speak or
+Design tab.
+
+- **Speak**: write a script or start from a sample, pick a voice, press **Speak**.
+  - A live counter shows words, sentences and roughly how long the read will be.
+  - A card explains the selected voice: built-in or cloned, model size, what it was cloned from.
+  - **Delivery** (Steady / Natural / Expressive) and **Tidy the text** sit above the buttons.
+    Tidy-up does the number, abbreviation and markdown cleanup and the one-sentence-per-line
+    split described under *Reading a script*, the same as `tts.py --text-file --join`.
+  - **Preview** shows the exact lines the model will get, with a time estimate, before you
+    commit to a slow run.
+  - **Advanced** holds the model size, language, the 1.7B style instruction, the pause lengths
+    and a seed.
+  - A seed of **0 means a fresh take**. Any other number is repeatable. Gradio turns an empty
+    number box into 0, so 0 can't double as a real seed.
+- **Design a voice**: invent a voice from a written description (VoiceDesign, 1.7B), with
+  one-click description ideas and the same render column.
+- **Voice library**: clone a voice in four numbered steps.
+  1. **Name** the voice.
+  2. **Record** in the browser while reading the suggested passage, or **upload** a file.
+  3. **Transcript**: one click fills it in if you read the passage.
+  4. **Save**.
+
+  As soon as a clip is in, a **quality report** grades it. It shows length (against the ideal
+  5–30 s), speech time, loudness and peak, and explains problems in words: silence, clipping,
+  too short or too long, mostly pauses. On save, the clip is trimmed of leading and trailing
+  silence, levelled, and kept as `voices/<name>.ref.wav` beside the voice, so it can be
+  auditioned later. Saved voices appear as cards. Each one can be auditioned, sent to the Speak
+  tab, or deleted with a two-step confirm. Saves the same `voices\<name>.pt` the CLI reads.
+- **Recordings**: every finished read, newest first, with playback, **Download**, and a
+  two-step **Delete**.
+- **Settings**: the machine report, restoring an earlier take, the pronunciation lexicon
+  editor, and housekeeping.
+
+**Recording in the browser.** The recorder is custom (`scripts/ui/recorder.js`) rather than
+Gradio's built-in microphone input. Gradio's recorder swallows permission and device errors, so
+its Record button just did nothing when the prompt was missed, the mic was blocked, or Windows'
+microphone privacy setting was off. It also showed "No microphone found" until permission was
+granted, and never refreshed. This recorder:
+- asks explicitly, and explains each failure with a fix (address-bar permission, Windows
+  Settings › Privacy › Microphone, mic in use by another app);
+- fills in the microphone picker once permission is granted;
+- gives a 3-2-1 count-in, a live waveform and level meter ("Speak up", "Good level", "Too
+  loud"), and a timer against the 5–30 s target;
+- encodes a 24 kHz mono 16-bit WAV in the browser, so no ffmpeg is needed.
+
+Recording works on `http://127.0.0.1` / `localhost` and over `--share` (https). Browsers block
+the microphone on a plain-http LAN address.
 
 **Live render progress.** A generation streams its own progress: a bar, an elapsed clock, an ETA
 computed from the lines that have already finished in *this* run, and a per-line list showing
@@ -462,52 +527,33 @@ which line is rendering, which are done (with their time and audio length) and w
 It is a pure view over the `on_line` callback `common.synth` already fires, so it adds nothing to
 the model path.
 
-**Stop.** Cancellation is checked between lines, never mid-line — a half-generated waveform is not
-usable audio. Whatever finished is still joined and saved, so a stopped run leaves a real file.
+**Stop.** Cancellation is checked between lines, never mid-line, because a half-generated
+waveform is not usable audio. Whatever finished is still joined and saved, so a stopped run
+leaves a real file.
 
 **Machine report.** The header shows cores, SIMD level, torch threads, free RAM, the resolved
 dtype and the measured speed. If the CPU lacks hardware bfloat16 *and* RAM has forced the slow
-path, it says so in as many words along with how much RAM to free. That specific trap cost hours
-before it was visible.
+path, it says so in as many words, along with how much RAM to free. That specific trap cost
+hours before it was visible.
 
-**Time estimate.** "Preview text" shows the exact lines and roughly how long they will take, using
-a seconds-per-frame figure `common.record_speed` calibrates from your own completed lines.
+**Time estimate.** "Preview" shows the exact lines and roughly how long they will take. It uses
+a seconds-per-frame figure that `common.record_speed` calibrates from your own completed lines
+(never from `--mock` runs).
 
-**Restore a take.** Each finished read writes a small session file next to its per-line audio, so a
-take stays repairable after a restart — restore it from Settings and use "Fix one line".
+**Restore a take.** Each finished read writes a small session file next to its per-line audio,
+so a take stays repairable after a restart. Restore it from Settings, then use "Fix one line".
 
 **Housekeeping.** Settings can delete per-line audio older than 24 hours that no restorable take
 refers to, with a preview first.
 
-**Lexicon editor.** `lexicon.txt` is editable in Settings; `textprep` re-reads it on mtime change,
-so a saved rule applies to the next generation with no restart.
+**Lexicon editor.** `lexicon.txt` is editable in Settings. `textprep` re-reads it whenever the
+file changes, so a saved rule applies to the next generation with no restart.
 
-
-**The simple app — start here.** `scripts/app.py` is one page for everything:
-
-```powershell
-python app.py                 # http://127.0.0.1:7860, opens your browser
-python app.py --offline       # skip Hugging Face network checks (see Gotchas)
-python app.py --port 8000 --share
-```
-
-`python launch_ui.py` with no argument launches the same app.
-
-- **Speak** — type or paste a script, pick a voice, press one button. The voice list holds
-  the nine built-in speakers *and* every voice you've saved under `voices\`. A **Delivery**
-  choice (Steady / Natural / Expressive) and a **Tidy the text** toggle sit above the button;
-  tidy-up does the number/abbreviation/markdown cleanup and one-sentence-per-line segmentation
-  described under *Reading a script* — the same behaviour as `tts.py --text-file --join`.
-  **Preview text** shows the exact lines that will be spoken before you commit to a slow run.
-  After a multi-line take, **Fix one line** re-generates a single sentence (optionally with a
-  new seed) and re-stitches the read, keeping the other lines. An **Advanced** panel exposes
-  model size, language, the 1.7B style instruction, the between-sentence and between-paragraph
-  gaps, and a seed.
-- **Describe a voice** — invent a voice from a written description (VoiceDesign, 1.7B). Same
-  Preview text and Fix one line controls.
-- **Voice library** — turn a recording into a reusable named voice (upload or record in the
-  browser, add the transcript, name it), and list or delete saved voices. Saves the same
-  `voices\<name>.pt` the CLI reads.
+**Design assets.** The logo is inline SVG (it animates, and stays crisp at any size), and
+`assets/favicon.svg` is its static copy. The masthead banner (`assets/banner.webp`) and the
+empty-library illustration (`assets/empty-voices.webp`) were generated for the project. The
+app picks them up when present and falls back to drawn SVG art otherwise. Styles and browser
+behaviour live in `scripts/ui/` (`studio.css`, `studio.js`, `recorder.js`) as ordinary files.
 
 `python app.py --low-memory` forces 0.6B to bfloat16 (it also auto-enables when RAM is tight);
 the RAM line at the top of the page says when low-memory mode is active. The app generates
