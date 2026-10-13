@@ -1,16 +1,79 @@
+# --- Python ---
 .venv/
+venv/
+env/
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Logs and experiment tracking ---
+*.log
+logs/
+wandb/
+runs/
+mlruns/
+lightning_logs/
+
+# Cached encodings of ad-hoc reference clips (see scripts/audio_prompt_cache.py).
+# Pure derived data -- safe to delete, rebuilt on demand.
+.cache/
+cache/
+
+# --- Model weights: never committed (base models come from Hugging Face) ---
+checkpoints/
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.gguf
+
+# --- Voice data: recordings are speakers' personal data, keep them out ---
+data/
+datasets/
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+*.parquet
+*.arrow
 
 # Generated audio
 output/*
 !output/.gitkeep
+outputs/
 
 # Your reference recordings -- any format, keep them out of the repo
 samples/*
 !samples/.gitkeep
+# ...except the short script used to smoke-test a fresh install.
+!samples/quick_test.txt
 
 # Saved voice prompts: derived from your reference clips, and they embed a
 # speaker fingerprint. Regenerate with `tts.py voices add` rather than commit.
 voices/*
 !voices/.gitkeep
+
+# --- OS / editor ---
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+*.swp

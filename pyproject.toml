@@ -1,0 +1,25 @@
+[project]
+name = "qwen3-tts-local"
+version = "0.1.0"
+description = "Local Qwen3-TTS setup for CPU inference: a unified CLI, a simple web app, text preparation and a voice library."
+requires-python = ">=3.10"  # developed and tested on 3.12.2
+# Pinned to the versions the test suite passes against.
+dependencies = [
+    "qwen-tts==0.1.1",
+    "gradio==6.17.3",
+    "soundfile==0.14.0",
+    "psutil==7.2.2",
+    "numpy==2.4.6",
+    "torch==2.13.0",
+    "pyloudnorm==0.2.0",   # loudness normalisation to a target LUFS (scripts/common.py)
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1"]
+
+# The project is a set of scripts under scripts/, not an installable package.
+# These settings just let `pytest` find the tests and import those modules.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["scripts"]
+addopts = "-q"
