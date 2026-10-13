@@ -204,12 +204,18 @@ def _asset_uri(stem: str) -> Optional[str]:
     return None
 
 
-def _hero_art() -> str:
-    """The masthead illustration: assets/banner.* if present, otherwise the
-    drawn skyline-waveform."""
+def _hero_css() -> str:
+    """The generated banner (assets/banner.*) becomes the masthead's own
+    background, so it fills the header edge to edge and is clipped by its
+    rounded corners instead of floating as a box inside it."""
     uri = _asset_uri("banner")
-    if uri:
-        return f'<div class="tts-hero__art" aria-hidden="true"><img alt="" src="{uri}"></div>'
+    return f'\n.gradio-container .tts-head {{ --tts-hero-img: url("{uri}"); }}\n' if uri else ""
+
+
+def _hero_art() -> str:
+    """Drawn skyline-waveform, used only when there is no banner bitmap."""
+    if _asset_uri("banner"):
+        return ""
     stars = "".join(f'<circle class="star" cx="{x}" cy="{y}" r="{r}"/>' for x, y, r in
                     ((300, 22, 1.2), (372, 40, 1.6), (455, 18, 1.1), (520, 46, 1.4), (590, 26, 1.2),
                      (250, 44, 1), (410, 30, .9)))
@@ -277,10 +283,11 @@ def get_model(kind: str, size: str):
 # the dtype, the bf16 capability and the measured speed on screen turns an
 # hour-long mystery into something you can read before you commit to a run.
 # ---------------------------------------------------------------------------
-def _chip(label: str, value: str, tone: str = "") -> str:
-    cls = f"tts-chip tts-chip--{tone}" if tone else "tts-chip"
-    return (f'<span class="{cls}"><span class="k">{escape(label)}</span>'
-            f'<b>{escape(value)}</b></span>')
+def _stat(label: str, value: str, tone: str = "") -> str:
+    """One machine-report card: a small label over its value. Tone is also
+    spelt out in the value text (e.g. "slow here"), never colour alone."""
+    cls = f"tts-hstat tts-hstat--{tone}" if tone else "tts-hstat"
+    return f'<div class="{cls}"><span>{escape(label)}</span><b>{escape(value)}</b></div>'
 
 
 def _speed_phrase(spf: Optional[float]) -> str:
@@ -325,17 +332,17 @@ def _system_html() -> str:
     # Amber, not red: low RAM and the bf16 path make runs slow, not broken.
     ram_tone = "warn" if (free or 0) < 3.2 else "ok"
     chips = [
-        _chip("CPU", f"{r.get('cores') or '?'} cores / {r.get('threads') or '?'} threads"),
-        _chip("SIMD", str(r.get("simd", "?"))),
-        _chip("torch threads", str(r.get("torch_threads", "?"))),
-        _chip("RAM free",
+        _stat("CPU", f"{r.get('cores') or '?'} cores / {r.get('threads') or '?'} threads"),
+        _stat("Vector unit", str(r.get("simd", "?"))),
+        _stat("Torch threads", str(r.get("torch_threads", "?"))),
+        _stat("RAM free",
               f"{free:.1f} of {total:.1f} GB" if free and total else "unknown",
               ram_tone),
-        _chip("Precision", dtype if dtype == "float32" else f"{dtype} (slow here)",
+        _stat("Precision", dtype if dtype == "float32" else f"{dtype} (slow here)",
               "ok" if dtype == "float32" else "warn"),
-        _chip("Speed", _speed_phrase(r.get("sec_per_frame"))),
+        _stat("Speed", _speed_phrase(r.get("sec_per_frame"))),
     ]
-    html = f'<div class="tts-chips" role="group" aria-label="Machine status">{"".join(chips)}</div>'
+    html = f'<div class="tts-hstats" role="group" aria-label="Machine status">{"".join(chips)}</div>'
 
     # The one warning that actually costs hours if missed.
     if dtype != "float32" and not r.get("bf16_native"):
@@ -1567,7 +1574,7 @@ def build_app() -> gr.Blocks:
             # ================= Settings =================
             with gr.Tab("Settings", id="settings") as settings_tab:
                 with gr.Row(equal_height=False, elem_classes="tts-split"):
-                    with gr.Column(elem_classes="tts-col"):
+                    with gr.Column(scale=3, elem_classes="tts-col"):
                         with gr.Column(elem_classes="tts-card"):
                             gr.HTML(_title("chip", "This machine", "What the app has to work with, and how fast it runs."))
                             sys_detail = gr.HTML(_system_detail_html())
@@ -1586,7 +1593,7 @@ def build_app() -> gr.Blocks:
                                 sess_restore = gr.Button("Restore into Speak", variant="primary")
                             sess_status = gr.HTML(elem_classes="tts-status")
 
-                    with gr.Column(elem_classes="tts-col"):
+                    with gr.Column(scale=2, elem_classes="tts-col"):
                         with gr.Column(elem_classes="tts-card"):
                             gr.HTML(_title("book", "Pronunciation lexicon",
                                            "One rule per line: <code>pattern -&gt; replacement</code>. Wrap "
@@ -1775,7 +1782,7 @@ def main() -> int:
 
     build_app().launch(
         # Gradio 6 takes css/theme/js here, not in the Blocks constructor.
-        css=CSS,
+        css=CSS + _hero_css(),
         theme=THEME,
         head=f"<script>{STUDIO_JS}</script>",
         favicon_path=str(ASSETS_DIR / "favicon.svg"),

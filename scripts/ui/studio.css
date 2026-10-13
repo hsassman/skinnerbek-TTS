@@ -140,7 +140,7 @@
    Base
    =========================================================================== */
 body, .gradio-container { background: var(--tts-bg) !important; }
-.gradio-container { max-width: 1320px !important; margin-inline: auto !important; font-size: var(--tts-fs-base); }
+.gradio-container { width: 100% !important; max-width: 1320px !important; margin-inline: auto !important; font-size: var(--tts-fs-base); }
 .gradio-container .main { gap: 0 !important; }
 footer { display: none !important; }   /* our own footer says what matters */
 ::selection { background: rgba(255,107,90,.28); }
@@ -840,3 +840,95 @@ kbd {
    footer share the cards' edge. */
 .gradio-container .html-container:has(.tts-welcome, .tts-foot),
 .gradio-container .tts-card .html-container { padding-left: 0 !important; padding-right: 0 !important; }
+
+/* ===========================================================================
+   Review round 3: hero, card alignment, input states
+   =========================================================================== */
+/* Hero: the banner is the header's own background -- fitted to the header's
+   top-right, fading into ink on the left and towards the stats -- so it sits
+   inside the rounded frame instead of floating as a box. --tts-hero-img is
+   set from app.py when assets/banner.* exists. */
+.gradio-container .tts-head {
+  padding: var(--tts-s7) !important;
+  gap: var(--tts-s6) !important;
+  background:
+    linear-gradient(90deg, var(--tts-ink) 24%, rgba(15,20,36,.80) 42%, rgba(15,20,36,.18) 66%, rgba(15,20,36,0) 82%),
+    linear-gradient(0deg, var(--tts-ink) 0%, var(--tts-ink) 34%, rgba(15,20,36,.55) 52%, rgba(15,20,36,0) 72%),
+    var(--tts-hero-img, none) right top / auto 300px no-repeat,
+    radial-gradient(90% 120% at 0% 100%, rgba(255,107,90,.10), transparent 60%),
+    var(--tts-ink) !important;
+}
+.tts-hero { align-items: center; min-height: 88px; }
+.tts-hero__actions { align-self: center; }          /* the toggle centres on the logo row */
+.tts-iconbtn { background: rgba(15,20,36,.6); }
+
+/* Machine report: equal cards on one grid. */
+.tts-hstats {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: var(--tts-s3);
+}
+.tts-hstat {
+  display: flex; flex-direction: column; justify-content: center; gap: var(--tts-s1); min-height: 72px;
+  padding: var(--tts-s3) var(--tts-s4); border-radius: var(--tts-r-sm);
+  background: rgba(255,255,255,.045); border: 1px solid rgba(255,255,255,.10);
+  backdrop-filter: blur(6px); animation: tts-pop .34s var(--tts-ease) both;
+}
+.tts-hstat:nth-child(2) { animation-delay: .04s; } .tts-hstat:nth-child(3) { animation-delay: .08s; }
+.tts-hstat:nth-child(4) { animation-delay: .12s; } .tts-hstat:nth-child(5) { animation-delay: .16s; }
+.tts-hstat:nth-child(6) { animation-delay: .20s; }
+.tts-hstat span { font-size: var(--tts-fs-xs); font-weight: 680; text-transform: uppercase; letter-spacing: .07em; color: #9aa4ba; }
+.gradio-container .tts-hstat b { font-size: var(--tts-fs-md); font-weight: 650; line-height: 1.35; color: #eef1f8 !important; }
+.tts-hstat--ok   { border-color: rgba(110,212,155,.32); background: rgba(110,212,155,.07); }
+.tts-hstat--warn { border-color: rgba(240,189,108,.38); background: rgba(240,189,108,.08); }
+.gradio-container .tts-hstat--ok b   { color: #8fe3b4 !important; }
+.gradio-container .tts-hstat--warn b { color: #f5cd8b !important; }
+.tts-head .tts-note { margin: 0; }
+.tts-hstats + .tts-note { margin-top: var(--tts-s4); }
+
+/* Cards: columns in a row stretch to one height, and the last card in each
+   column fills it, so cards in a row start and end on the same lines. */
+.gradio-container .tts-split { align-items: stretch !important; }
+.gradio-container .tts-col > .tts-card:last-child { flex-grow: 1 !important; }
+.gradio-container .tts-card--sticky { position: static !important; }
+
+/* Inputs: Gradio's blocks clip their overflow, which cut the focus ring off at
+   the edges (and left marks in the corners). Let it show, use one radius, and
+   give every field the same hover and focus treatment -- text boxes and
+   dropdowns alike (a dropdown's border lives on its outer .wrap). */
+.gradio-container .tts-card .block { overflow: visible !important; }
+.gradio-container .tts-card :is(textarea, input[type="text"], input[type="number"]),
+.gradio-container .tts-card .wrap:has(input[role="listbox"]) {
+  border: 1px solid var(--tts-ui-border) !important; border-radius: var(--tts-r-xs) !important;
+  transition: border-color var(--tts-dur-fast) var(--tts-ease), box-shadow var(--tts-dur-fast) var(--tts-ease) !important;
+}
+.gradio-container .tts-card :is(textarea, input[type="text"], input[type="number"]):hover:not(:focus),
+.gradio-container .tts-card .wrap:has(input[role="listbox"]):hover:not(:focus-within) {
+  border-color: var(--tts-muted) !important;
+}
+.gradio-container .tts-card :is(textarea, input[type="text"], input[type="number"]):focus,
+.gradio-container .tts-card .wrap:has(input[role="listbox"]):focus-within {
+  border-color: var(--tts-accent) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--tts-accent) 32%, transparent) !important;
+}
+/* One focus indicator per field: the ring above, not the ring plus an outline. */
+.gradio-container .tts-card :is(textarea, input[type="text"], input[type="number"], input[role="listbox"]):focus-visible {
+  outline: none !important;
+}
+
+/* Centring the app made Gradio's main column (and so the tab panel)
+   shrink-to-fit the active tab, so a tab with little in it (Recordings) came
+   out narrower and off-centre. They always span the full content width. */
+.gradio-container main.contain,
+.gradio-container main.contain > .column,
+.gradio-container .tts-tabs,
+.gradio-container .tts-tabs > .tabitem,
+.gradio-container .tts-tabs > .tabitem > .column,
+.gradio-container .tts-tabs .tts-split { width: 100% !important; align-self: stretch !important; }
+
+/* Reserve the scrollbar's space so short tabs (no scrollbar) don't shift the
+   centred layout sideways when switching tabs. */
+html { scrollbar-gutter: stable; }
+
+/* The masthead is ink in both themes, but Gradio's `.prose *` colours every
+   descendant with the page's body colour -- dark in light mode. Keep the
+   masthead note's summary and body light. */
+.gradio-container .tts-head .tts-note, .gradio-container .tts-head .tts-note * { color: #e6eaf3 !important; }
