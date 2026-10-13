@@ -16,6 +16,8 @@
   const TARGET_SR = 24000, MIN_S = 5, GOOD_S = 30, MAX_S = 45;
   const host = element.querySelector('.tts-rec') || element;
   const MIC = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>';
+  host.setAttribute('role', 'group');
+  host.setAttribute('aria-label', 'Record a reference clip');
   host.innerHTML = `
     <div class="tts-rec__row">
       <button type="button" class="tts-rec__btn" data-act="toggle" aria-label="Start recording">${MIC}<span class="sq"></span></button>
@@ -24,7 +26,7 @@
         <div class="tts-rec__sub" data-el="sub">Press the button and read the passage above in your natural voice. Aim for 10&ndash;20 seconds.</div>
       </div>
       <span class="tts-rec__level" data-el="level" hidden>Level</span>
-      <div class="tts-rec__time" data-el="time" aria-live="off">0:00</div>
+      <div class="tts-rec__time" data-el="time" aria-hidden="true">0:00</div>
     </div>
     <canvas data-el="wave" height="64" aria-hidden="true"></canvas>
     <div class="tts-rec__zone" aria-hidden="true"><div class="ok"></div><div class="fill" data-el="fill"></div></div>
@@ -139,6 +141,15 @@
     }
   }
 
+  // Idle: a quiet dotted baseline so the empty area reads as "waveform goes here".
+  function drawIdle() {
+    const w = canvas.width = Math.max(1, canvas.clientWidth) * devicePixelRatio, h = canvas.height = 64 * devicePixelRatio;
+    ctx2d.clearRect(0, 0, w, h);
+    ctx2d.fillStyle = getComputedStyle(host).getPropertyValue('--tts-faint').trim() || '#8d97ad';
+    const step = 6 * devicePixelRatio, r = 1.2 * devicePixelRatio;
+    for (let x = step / 2; x < w; x += step) { ctx2d.beginPath(); ctx2d.arc(x, h / 2, r, 0, Math.PI * 2); ctx2d.fill(); }
+  }
+
   async function countIn() {
     const t = $('time');
     for (const n of [3, 2, 1]) {
@@ -173,14 +184,14 @@
     setState('recording');
     $('title').textContent = 'Recording';
     $('sub').textContent = 'Speak naturally. Press stop when you are done.';
-    say('');
+    say('Recording. Press the stop button when you are done.', 'ok');
     started = performance.now();
     drawLive();
     timer = setInterval(() => {
       const s = (performance.now() - started) / 1000;
       $('time').textContent = fmt(s);
       $('fill').style.width = `${Math.min(100, (s / MAX_S) * 100)}%`;
-      if (s >= MAX_S) stop();
+      if (s >= MAX_S) { stop(); say(`Recording stopped at the ${MAX_S}-second limit. Listen back below.`, 'warn'); }
     }, 200);
   }
 
@@ -216,7 +227,7 @@
   }
 
   function stop() {
-    if (state === 'counting') { release(); setState('idle'); $('time').textContent = '0:00'; return; }
+    if (state === 'counting') { release(); setState('idle'); $('time').textContent = '0:00'; drawIdle(); return; }
     if (state !== 'recording') return;
     const secs = (performance.now() - started) / 1000;
     release();
@@ -240,11 +251,15 @@
   btn.addEventListener('click', () => { (state === 'recording' || state === 'counting') ? stop() : start(); });
   host.querySelector('[data-act="again"]').addEventListener('click', () => {
     setState('idle'); say(''); $('time').textContent = '0:00'; $('fill').style.width = '0';
-    ctx2d.clearRect(0, 0, canvas.width, canvas.height); start();
+    drawIdle(); start();
   });
   host.querySelector('[data-act="use"]').addEventListener('click', async (e) => {
     if (!blob) return;
-    const b = e.currentTarget; b.disabled = true; b.textContent = 'Sending…';
+    // aria-disabled, not disabled: disabling the focused button would drop
+    // keyboard focus to <body>.
+    const b = e.currentTarget;
+    if (b.getAttribute('aria-disabled') === 'true') return;
+    b.setAttribute('aria-disabled', 'true'); b.textContent = 'Sending…';
     try {
       const file = new File([blob], `recording_${Date.now()}.wav`, { type: 'audio/wav' });
       const res = await upload(file);
@@ -253,13 +268,10 @@
       say('<strong>Take added.</strong> It is now the clip below &mdash; check the quality report, add the transcript and save.', 'ok');
     } catch (err) {
       say(`<strong>Could not send the take to the app.</strong> ${(err && err.message) || err}`, 'err');
-    } finally { b.disabled = false; b.textContent = 'Use this take'; }
+    } finally { b.removeAttribute('aria-disabled'); b.textContent = 'Use this take'; }
   });
 
-  // Space toggles recording when the recorder has focus.
-  host.tabIndex = -1;
-  host.addEventListener('keydown', (e) => {
-    if (e.code === 'Space' && e.target === host) { e.preventDefault(); btn.click(); }
-  });
   listDevices();
+  // The canvas has no width until its tab is shown; draw once it does.
+  new ResizeObserver(() => { if (state === 'idle' || state === 'counting') drawIdle(); }).observe(canvas);
 })();

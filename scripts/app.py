@@ -150,7 +150,7 @@ def _icon(name: str) -> str:
 # Drawn as SVG (not the generated bitmap) so it is crisp at every size and its
 # bars can animate. assets/favicon.svg is the static copy of the same shape.
 LOGO_SVG = (
-    '<svg viewBox="0 0 64 64" role="img" aria-label="Skinnerbek logo">'
+    '<svg viewBox="0 0 64 64" aria-hidden="true" focusable="false">'
     '<defs><linearGradient id="tts-logo-g" x1="0" y1="1" x2="1" y2="0">'
     '<stop offset="0" stop-color="#ff5a5f"/><stop offset=".55" stop-color="#ff8f50"/>'
     '<stop offset="1" stop-color="#ffb547"/></linearGradient></defs>'
@@ -312,7 +312,7 @@ def _system_detail_html() -> str:
          (f" (median of {speed_sample_count()} lines)" if spf else "")),
     ]
     body = "".join(
-        f"<tr><td>{escape(k)}</td><td>{escape(v)}</td></tr>" for k, v in rows
+        f'<tr><th scope="row">{escape(k)}</th><td>{escape(v)}</td></tr>' for k, v in rows
     )
     return f'<table class="tts-kv">{body}</table>'
 
@@ -322,7 +322,8 @@ def _system_html() -> str:
     free, total = r.get("free_gb"), r.get("total_gb")
     dtype = r.get("dtype", "?")
 
-    ram_tone = "err" if (free or 0) < 1.5 else "warn" if (free or 0) < 3.2 else "ok"
+    # Amber, not red: low RAM and the bf16 path make runs slow, not broken.
+    ram_tone = "warn" if (free or 0) < 3.2 else "ok"
     chips = [
         _chip("CPU", f"{r.get('cores') or '?'} cores / {r.get('threads') or '?'} threads"),
         _chip("SIMD", str(r.get("simd", "?"))),
@@ -330,7 +331,8 @@ def _system_html() -> str:
         _chip("RAM free",
               f"{free:.1f} of {total:.1f} GB" if free and total else "unknown",
               ram_tone),
-        _chip("Precision", dtype, "ok" if dtype == "float32" else "err"),
+        _chip("Precision", dtype if dtype == "float32" else f"{dtype} (slow here)",
+              "ok" if dtype == "float32" else "warn"),
         _chip("Speed", _speed_phrase(r.get("sec_per_frame"))),
     ]
     html = f'<div class="tts-chips" role="group" aria-label="Machine status">{"".join(chips)}</div>'
@@ -339,12 +341,12 @@ def _system_html() -> str:
     if dtype != "float32" and not r.get("bf16_native"):
         need = max(0.0, 3.2 - (free or 0))
         html += (
-            '<div class="tts-note tts-note--err" role="alert">'
-            "<strong>Running on the slow path.</strong> This CPU has no hardware "
-            "bfloat16, so torch emulates it &mdash; about <strong>25&times; slower "
-            "per step</strong> than float32. Free "
-            f"<strong>{need:.1f} GB</strong> more RAM (closing a browser usually does it) "
-            "and float32 is picked automatically on the next generation.</div>"
+            '<details class="tts-note tts-note--warn">'
+            f"<summary><strong>Running on the slow path.</strong> Free {need:.1f} GB of RAM "
+            "to speed up the next take.</summary>"
+            "<p>This CPU has no hardware bfloat16, so torch emulates it &mdash; about "
+            "<strong>25&times; slower per step</strong> than float32. Closing a browser usually "
+            "frees enough, and float32 is picked automatically on the next generation.</p></details>"
         )
     elif ram_tone == "warn":
         html += (
@@ -508,7 +510,8 @@ def _idle_html(title: str = "Nothing rendering", msg: str = "", art: bool = True
 def _sec(title: str, level: int = 2, n: Optional[int] = None) -> str:
     """One section-heading rhythm for every tab: a small uppercase label with a
     rule running to the edge, optionally numbered as a step."""
-    num = f'<span class="tts-sec__n" aria-hidden="true">{n}</span>' if n else ""
+    num = (f'<span class="tts-sec__n" aria-hidden="true">{n}</span><span class="tts-sr">Step {n}: </span>'
+           if n else "")
     return f'<div class="tts-sec">{num}<h{level}>{escape(title)}</h{level}></div>'
 
 
@@ -867,19 +870,14 @@ def _voice_card_html(value: Optional[str]) -> str:
         more = "…" if len(said) > 110 else ""
         desc = (f"Cloned from a reference clip: <q>{escape(said[:110])}{more}</q>"
                 if said else "Cloned from a reference clip, timbre only.")
-    return (f'<div class="tts-vcard"><div class="tts-avatar" style="--h:{_hue(label)}">'
-            f"{escape(_initials(label))}</div><div><h4>{escape(label)}</h4><p>{desc}</p>"
+    return (f'<div class="tts-vcard"><div class="tts-avatar" aria-hidden="true" style="--h:{_hue(label)}">'
+            f"{escape(_initials(label))}</div><div><h3>{escape(label)}</h3><p>{desc}</p>"
             f'<div class="tts-tags">{"".join(tags)}</div></div></div>')
 
 
 def _voices_gallery_html() -> str:
     names = list_voices()
     if not names:
-        art = _asset_uri("empty-voices")
-        if art:
-            return ('<div class="tts-empty"><img class="tts-empty__img" alt="" src="' + art + '">'
-                    "<b>No saved voices yet</b>Record or upload a clip on the left and it will "
-                    "appear here.</div>")
         return _idle_html("No saved voices yet",
                           " Record or upload a clip on the left and it will appear here.")
     return ('<div class="tts-gallery">'
@@ -902,14 +900,19 @@ def _clip_report_html(path) -> str:
     mark = min(100.0, r.duration / span * 100)
     lo, hi = refclip.IDEAL_SECONDS
     stats = [("Length", f"{r.duration:.1f}s"), ("Speech", f"{r.speech_seconds:.1f}s"),
-             ("Loudness", f"{r.rms_db:.0f} dB"), ("Peak", f"{r.peak_db:.1f} dB")]
-    issues = "".join(f"<li>{escape(m)}</li>" for _, m in r.issues)
+             ("Loudness", f"{r.rms_db:.0f} dBFS"), ("Peak", f"{r.peak_db:.1f} dBFS")]
+    issues = "".join(
+        f'<li><strong>{"Problem" if lvl == "err" else "Note"}:</strong> {escape(m)}</li>'
+        for lvl, m in r.issues)
     channels = "stereo" if r.channels > 1 else "mono"
     return (
         f'<div class="tts-qa tts-qa--{r.grade}" role="status">'
         f'<div class="tts-qa__head"><span class="tts-qa__grade">{icon} {verdict}</span>'
         f'<span class="tts-tag">{r.sample_rate} Hz &middot; {channels}</span></div>'
-        f'<div class="tts-lenbar" title="Green is the ideal {lo:.0f}-{hi:.0f} second range">'
+        f'<div class="tts-lenbar__cap"><span>Length</span><span>ideal {lo:.0f}&ndash;{hi:.0f} s, '
+        f'shown in green</span></div>'
+        f'<div class="tts-lenbar" role="img" aria-label="Length {r.duration:.1f} seconds; ideal is '
+        f'{lo:.0f} to {hi:.0f} seconds">'
         f'<div class="tts-lenbar__zone" style="left:{lo / span * 100:.1f}%;width:{(hi - lo) / span * 100:.1f}%"></div>'
         f'<div class="tts-lenbar__mark" style="left:calc({mark:.1f}% - 1px)"></div></div>'
         '<div class="tts-qa__stats">'
@@ -1051,12 +1054,13 @@ def do_refresh_recordings():
 def do_pick_recording(path):
     """Returns (player, meta card, download button)."""
     if not path or not Path(path).exists():
-        return None, _idle_html("Nothing selected", " Generated reads appear here, newest first."), gr.update(visible=False)
+        return (None, _idle_html("No recordings yet", " Finished takes appear here, newest first."),
+                gr.update(visible=False))
     try:
         info = sf.info(str(path))
         when = time.strftime("%d %b %Y, %H:%M", time.localtime(Path(path).stat().st_mtime))
-        meta = (f'<div class="tts-vcard"><div class="tts-avatar" style="--h:{_hue(Path(path).stem)}">'
-                f'{_icon("play")}</div><div><h4>{escape(Path(path).name)}</h4>'
+        meta = (f'<div class="tts-vcard"><div class="tts-avatar" aria-hidden="true" style="--h:{_hue(Path(path).stem)}">'
+                f'{_icon("play")}</div><div><h3>{escape(Path(path).name)}</h3>'
                 f"<p>{when}</p><div class=\"tts-tags\">"
                 f'<span class="tts-tag tts-tag--accent">{info.duration:.1f}s</span>'
                 f'<span class="tts-tag">{info.samplerate} Hz</span>'
@@ -1222,22 +1226,24 @@ def _masthead_html() -> str:
         f'<span class="tts-badge">{_icon("wifi_off")} Works offline</span>'
         "</div></div></div>"
         '<div class="tts-hero__actions">'
-        f'<button class="tts-iconbtn" type="button" data-skb="theme" title="Switch light / dark" '
-        f'aria-label="Switch light or dark theme">{_icon("moon")}</button>'
+        f'<button class="tts-iconbtn" type="button" data-skb="theme" title="Dark theme" '
+        f'aria-label="Dark theme" aria-pressed="false">{_icon("moon")}</button>'
         "</div></div>"
     )
 
 
 WELCOME_HTML = (
-    '<div class="tts-welcome" role="note">'
-    '<div class="tts-step"><i>1</i><div><b>Write or paste a script</b>'
-    "<span>Or start from a sample. Long text is split into sentences for you.</span></div></div>"
-    '<div class="tts-step"><i>2</i><div><b>Pick a voice</b>'
-    "<span>Clone a real Cape Town voice in the Voice library for an authentic accent.</span></div></div>"
-    '<div class="tts-step"><i>3</i><div><b>Press Speak</b>'
-    "<span>Or <kbd>Ctrl</kbd> + <kbd>Enter</kbd>. Each line renders, then joins into one take.</span></div></div>"
-    '<button class="tts-welcome__x" type="button" data-skb="welcome-close" aria-label="Dismiss">&times;</button>'
-    "</div>"
+    '<section class="tts-welcome" aria-label="Getting started"><ol class="tts-welcome__steps">'
+    '<li class="tts-step"><i aria-hidden="true">1</i><div><b>Write or paste a script</b>'
+    "<span>Or start from a sample. Long text is split into sentences for you.</span></div></li>"
+    '<li class="tts-step"><i aria-hidden="true">2</i><div><b>Pick a voice</b>'
+    "<span>Clone a real Cape Town voice in the Voice library for an authentic accent.</span></div></li>"
+    '<li class="tts-step"><i aria-hidden="true">3</i><div><b>Press Speak</b>'
+    "<span>Or <kbd>Ctrl</kbd> + <kbd>Enter</kbd>. Each line renders, then joins into one take.</span></div></li>"
+    "</ol>"
+    '<button class="tts-welcome__x" type="button" data-skb="welcome-close" '
+    'aria-label="Dismiss the getting-started steps">&times;</button>'
+    "</section>"
 )
 
 FOOTER_HTML = (
@@ -1289,7 +1295,8 @@ def _render_column(label_prefix: str, button_word: str):
         gr.HTML(_title("render", "Your take", "Each line appears here as it renders."))
         progress = gr.HTML(_idle_html(
             "Ready when you are", f" Press {button_word} and watch each line render here."))
-        audio = gr.Audio(label=f"{label_prefix} result", type="filepath", elem_classes="tts-player",
+        audio = gr.Audio(label=f"{label_prefix} result", type="filepath",
+                         elem_classes=["tts-player", "tts-result"],
                          waveform_options=WAVEFORM)
         status = gr.HTML(elem_classes="tts-status")
         with gr.Accordion("Prepared text", open=False, elem_classes="tts-pane"):
@@ -1336,10 +1343,10 @@ def build_app() -> gr.Blocks:
                         with gr.Column(elem_classes="tts-card"):
                             gr.HTML(_title("voice", "Voice", "Built-in speakers, plus every voice you've cloned."))
                             with gr.Row(equal_height=False, elem_classes="tts-pickrow"):
-                                voice = gr.Dropdown(label="Voice", choices=voice_choices(),
+                                voice = gr.Dropdown(label="Voice", show_label=False, choices=voice_choices(),
                                                     value="preset:ryan", scale=5)
-                                refresh_btn = gr.Button("↻", scale=0, min_width=48,
-                                                        elem_classes="tts-pill")
+                                refresh_btn = gr.Button("Refresh", scale=0, min_width=96,
+                                                        variant="secondary", elem_classes="tts-refresh")
                             voice_card = gr.HTML(_voice_card_html("preset:ryan"))
                             delivery = gr.Radio(["Steady", "Natural", "Expressive"], value="Steady",
                                                 label="Delivery", info=DELIVERY_INFO,
@@ -1371,9 +1378,10 @@ def build_app() -> gr.Blocks:
                                 speak_btn = gr.Button("Speak", variant="primary", scale=4,
                                                       elem_id="tts-speak-btn", elem_classes="tts-go")
                                 preview_btn = gr.Button("Preview", scale=1, variant="secondary")
-                                stop_btn = gr.Button("Stop", variant="stop", scale=1)
-                            gr.HTML('<div class="tts-hint">Tip: <kbd>Ctrl</kbd> + <kbd>Enter</kbd> '
-                                    "speaks from anywhere on this tab</div>")
+                                stop_btn = gr.Button("Stop", variant="secondary", scale=1,
+                                                     elem_classes="tts-cancel")
+                            gr.HTML('<div class="tts-hint">Tip: press <kbd>Ctrl</kbd> + <kbd>Enter</kbd> '
+                                    "(<kbd>&#8984;</kbd> + <kbd>Enter</kbd> on a Mac) to speak</div>")
                     with gr.Column(scale=2, elem_classes="tts-col"):
                         (s_prog, audio, status, preview_md,
                          redo_line, redo_seed, redo_btn, redo_status) = _render_column("Speak", "Speak")
@@ -1429,13 +1437,14 @@ def build_app() -> gr.Blocks:
                                 d_seed = gr.Number(label="Seed", precision=0, value=0,
                                                    info="0 gives a fresh take each time.")
                             with gr.Row(elem_classes="tts-actions"):
-                                d_btn = gr.Button("Generate", variant="primary", scale=4,
+                                d_btn = gr.Button("Speak", variant="primary", scale=4,
                                                   elem_id="tts-design-btn", elem_classes="tts-go")
                                 d_preview_btn = gr.Button("Preview", scale=1, variant="secondary")
-                                d_stop = gr.Button("Stop", variant="stop", scale=1)
+                                d_stop = gr.Button("Stop", variant="secondary", scale=1,
+                                                   elem_classes="tts-cancel")
                     with gr.Column(scale=2, elem_classes="tts-col"):
                         (d_prog, d_audio, d_status, d_preview_md,
-                         d_redo_line, d_redo_seed, d_redo_btn, d_redo_status) = _render_column("Design", "Generate")
+                         d_redo_line, d_redo_seed, d_redo_btn, d_redo_status) = _render_column("Design", "Speak")
 
                 d_script.input(None, inputs=[d_script], outputs=[d_counter], js=COUNTER_JS)
                 d_script.change(None, inputs=[d_script], outputs=[d_counter], js=COUNTER_JS)
@@ -1533,7 +1542,8 @@ def build_app() -> gr.Blocks:
                             with gr.Row(equal_height=False, elem_classes="tts-pickrow"):
                                 rec_list = gr.Dropdown(label="Recording", choices=_recording_choices(),
                                                        value=None, scale=5)
-                                rec_refresh = gr.Button("↻", scale=0, min_width=48, elem_classes="tts-pill")
+                                rec_refresh = gr.Button("Refresh", scale=0, min_width=96,
+                                                        variant="secondary", elem_classes="tts-refresh")
                             rec_meta = gr.HTML()
                     with gr.Column(scale=2, elem_classes="tts-col"):
                         with gr.Column(elem_classes="tts-card"):
@@ -1582,8 +1592,9 @@ def build_app() -> gr.Blocks:
                                            "One rule per line: <code>pattern -&gt; replacement</code>. Wrap "
                                            "the pattern in <code>/slashes/</code> for a regex. Applies from "
                                            "the next generation, no restart."))
-                            lex_box = gr.Code(label="lexicon.txt", lines=14, value=do_load_lexicon(),
-                                              language=None, interactive=True)
+                            lex_box = gr.Textbox(label="lexicon.txt", lines=14, max_lines=40,
+                                                 value=do_load_lexicon(), interactive=True,
+                                                 elem_classes="tts-mono")
                             with gr.Row(elem_classes="tts-actions"):
                                 lex_reload = gr.Button("Reload from disk", variant="secondary")
                                 lex_save = gr.Button("Save lexicon", variant="primary")
@@ -1621,8 +1632,9 @@ def build_app() -> gr.Blocks:
         # each tab fills itself when it is opened, which also keeps it fresh.
         voices_tab.select(refresh_voice_lists, outputs=[voice, v_pick, gallery]).then(
             do_pick_voice, inputs=[v_pick], outputs=[v_audio, v_card])
-        rec_tab.select(do_refresh_recordings, outputs=[rec_list]).then(
-            do_pick_recording, inputs=[rec_list], outputs=[rec_audio, rec_meta, rec_dl])
+        # Refreshing sets the dropdown, and its .change loads the player; loading
+        # here too raced it (two fetches of the same file, the first a 503).
+        rec_tab.select(do_refresh_recordings, outputs=[rec_list])
         settings_tab.select(do_refresh_sessions, outputs=[sess_list]).then(
             do_system_detail_refresh, outputs=[sys_detail])
 
@@ -1643,26 +1655,75 @@ THEME = gr.themes.Soft(
     font_mono=[gr.themes.GoogleFont("JetBrains Mono"), "Consolas", "ui-monospace", "monospace"],
     radius_size="lg",
 ).set(
-    body_background_fill="#f6f3ef",
-    body_background_fill_dark="#0a0e18",
-    block_background_fill="#ffffff",
-    block_background_fill_dark="#111725",
-    block_border_color="#e4ddd4",
-    block_border_color_dark="#253048",
-    input_background_fill="#fbf9f6",
-    input_background_fill_dark="#0f1522",
-    input_border_color="#e4ddd4",
-    input_border_color_dark="#253048",
-    block_label_background_fill="transparent",
-    block_label_background_fill_dark="transparent",
-    block_label_text_color="#555d70",
-    block_label_text_color_dark="#a7b0c4",
-    block_title_text_color="#171a26",
-    block_title_text_color_dark="#eef1f8",
-    checkbox_background_color_selected="#ff6b5a",
-    checkbox_background_color_selected_dark="#ff6b5a",
-    slider_color="#ff6b5a",
-    slider_color_dark="#ff8a78",
+    # Every built-in component aligned with the brand tokens in ui/studio.css and
+    # checked for WCAG AA: text >= 4.5:1, control boundaries >= 3:1. Light first,
+    # then the _dark variant. Gradio has no _dark for color_accent or the shadows;
+    # studio.css sets --color-accent per theme instead.
+    body_background_fill="#f6f3ef", body_background_fill_dark="#0a0e18",
+    body_text_color="#171a26", body_text_color_dark="#eef1f8",
+    body_text_color_subdued="#5d6578", body_text_color_subdued_dark="#8d97ad",
+    background_fill_primary="#ffffff", background_fill_primary_dark="#0a0e18",
+    background_fill_secondary="#f6f3ef", background_fill_secondary_dark="#111725",
+    panel_background_fill="#f8f5f1", panel_background_fill_dark="#151c2d",
+    panel_border_color="#e4ddd4", panel_border_color_dark="#253048",
+    border_color_primary="#e4ddd4", border_color_primary_dark="#253048",
+    border_color_accent="#bf3626", border_color_accent_dark="#ff8a78",
+    color_accent="#bf3626", color_accent_soft="#fdeee9", color_accent_soft_dark="#2a1a1d",
+    block_background_fill="#ffffff", block_background_fill_dark="#111725",
+    block_border_color="#e4ddd4", block_border_color_dark="#253048",
+    block_label_background_fill="transparent", block_label_background_fill_dark="transparent",
+    block_label_text_color="#555d70", block_label_text_color_dark="#a7b0c4",
+    block_title_text_color="#171a26", block_title_text_color_dark="#eef1f8",
+    block_info_text_color="#5d6578", block_info_text_color_dark="#8d97ad",
+    accordion_text_color="#171a26", accordion_text_color_dark="#eef1f8",
+    input_background_fill="#f8f5f1", input_background_fill_dark="#0a0e18",
+    input_background_fill_focus="#ffffff", input_background_fill_focus_dark="#0a0e18",
+    input_background_fill_hover="#f8f5f1", input_background_fill_hover_dark="#0a0e18",
+    input_border_width="1px", input_border_width_dark="1px",
+    input_border_color="#8c8273", input_border_color_dark="#6b7591",
+    input_border_color_hover="#6f6658", input_border_color_hover_dark="#8d97ad",
+    input_border_color_focus="#bf3626", input_border_color_focus_dark="#ff8a78",
+    input_placeholder_color="#616980", input_placeholder_color_dark="#8d97ad",
+    input_shadow="0 1px 2px rgba(23,26,38,.05)", input_shadow_dark="0 1px 2px rgba(0,0,0,.45)",
+    input_shadow_focus="0 0 0 3px rgba(191,54,38,.18)", input_shadow_focus_dark="0 0 0 3px rgba(255,138,120,.22)",
+    checkbox_background_color="#ffffff", checkbox_background_color_dark="#151c2d",
+    checkbox_background_color_hover="#f8f5f1", checkbox_background_color_hover_dark="#1c2539",
+    checkbox_background_color_focus="#ffffff", checkbox_background_color_focus_dark="#151c2d",
+    checkbox_background_color_selected="#bf3626", checkbox_background_color_selected_dark="#ff6b5a",
+    checkbox_border_width="1px", checkbox_border_width_dark="1px",
+    checkbox_border_color="#8c8273", checkbox_border_color_dark="#6b7591",
+    checkbox_border_color_hover="#6f6658", checkbox_border_color_hover_dark="#8d97ad",
+    checkbox_border_color_focus="#bf3626", checkbox_border_color_focus_dark="#ff8a78",
+    checkbox_border_color_selected="#bf3626", checkbox_border_color_selected_dark="#ff6b5a",
+    checkbox_label_background_fill="#ffffff", checkbox_label_background_fill_dark="#151c2d",
+    checkbox_label_background_fill_hover="#f8f5f1", checkbox_label_background_fill_hover_dark="#1c2539",
+    checkbox_label_text_color="#171a26", checkbox_label_text_color_dark="#eef1f8",
+    slider_color="#bf3626", slider_color_dark="#ff8a78",
+    loader_color="#bf3626", loader_color_dark="#ff8a78",
+    link_text_color="#bf3626", link_text_color_dark="#ff8a78",
+    link_text_color_hover="#a02a21", link_text_color_hover_dark="#ffa192",
+    link_text_color_visited="#a02a21", link_text_color_visited_dark="#ffa192",
+    button_secondary_background_fill="#ffffff", button_secondary_background_fill_dark="#111725",
+    button_secondary_background_fill_hover="#fdeee9", button_secondary_background_fill_hover_dark="#2a1a1d",
+    button_secondary_border_color="#8c8273", button_secondary_border_color_dark="#6b7591",
+    button_secondary_border_color_hover="#bf3626", button_secondary_border_color_hover_dark="#ff8a78",
+    button_secondary_text_color="#171a26", button_secondary_text_color_dark="#eef1f8",
+    button_secondary_text_color_hover="#bf3626", button_secondary_text_color_hover_dark="#ff8a78",
+    button_cancel_background_fill="#ffffff", button_cancel_background_fill_dark="#111725",
+    button_cancel_background_fill_hover="#fdeeec", button_cancel_background_fill_hover_dark="#2e1816",
+    button_cancel_border_color="#a02a21", button_cancel_border_color_dark="#ff9f96",
+    button_cancel_text_color="#a02a21", button_cancel_text_color_dark="#ff9f96",
+    button_cancel_text_color_hover="#a02a21", button_cancel_text_color_hover_dark="#ff9f96",
+    table_border_color="#e4ddd4", table_border_color_dark="#253048",
+    table_even_background_fill="#ffffff", table_even_background_fill_dark="#111725",
+    table_odd_background_fill="#f8f5f1", table_odd_background_fill_dark="#151c2d",
+    table_row_focus="#fdeee9", table_row_focus_dark="#2a1a1d",
+    code_background_fill="#efe9e2", code_background_fill_dark="#151c2d",
+    error_background_fill="#fdeeec", error_background_fill_dark="#2e1816",
+    error_border_color="#a02a21", error_border_color_dark="#ff9f96",
+    error_text_color="#a02a21", error_text_color_dark="#ff9f96",
+    shadow_drop="0 1px 2px rgba(23,26,38,.07)",
+    shadow_drop_lg="0 1px 2px rgba(23,26,38,.05), 0 8px 24px rgba(23,26,38,.07)",
 )
 
 

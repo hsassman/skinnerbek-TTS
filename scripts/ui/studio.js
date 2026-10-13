@@ -14,11 +14,17 @@ const boot = () => {
   // Theme: remember an explicit choice; otherwise Gradio follows the OS.
   // Gradio sets its own `dark` class once it mounts, so re-apply an explicit
   // choice after that rather than racing it.
+  const syncToggle = () => {
+    document.querySelectorAll('[data-skb="theme"]').forEach((b) =>
+      b.setAttribute('aria-pressed', String(document.body.classList.contains('dark'))));
+  };
   const applyTheme = () => {
     const saved = store.get('skb-theme');
     if (saved === 'dark') document.body.classList.add('dark');
     if (saved === 'light') document.body.classList.remove('dark');
+    syncToggle();
   };
+  if (!document.documentElement.lang) document.documentElement.lang = 'en-ZA';
   applyTheme();
   [0, 400, 1500].forEach((ms) => setTimeout(applyTheme, ms));
   window.addEventListener('load', applyTheme);
@@ -33,19 +39,38 @@ const boot = () => {
       const dark = !document.body.classList.contains('dark');
       document.body.classList.toggle('dark', dark);
       store.set('skb-theme', dark ? 'dark' : 'light');
+      syncToggle();
     } else if (act === 'welcome-close') {
       const w = t.closest('.tts-welcome');
       if (w) w.hidden = true;
       store.set('skb-welcome', 'done');
+      // The button just vanished; put focus somewhere useful, not on <body>.
+      const box = document.querySelector('.tts-card textarea');
+      if (box) box.focus();
     }
   });
 
-  const hideWelcome = () => {
-    if (store.get('skb-welcome') !== 'done') return;
-    document.querySelectorAll('.tts-welcome').forEach((w) => { w.hidden = true; });
+  // Gradio renders lazily, so late-arriving nodes get the same treatment:
+  // dismissed welcome stays hidden, the theme toggle reports its state, and
+  // status slots become polite live regions (their content is what changes).
+  const onDom = () => {
+    if (store.get('skb-welcome') === 'done') {
+      document.querySelectorAll('.tts-welcome').forEach((w) => { w.hidden = true; });
+    }
+    document.querySelectorAll('.tts-status:not([aria-live])').forEach((el) => {
+      el.setAttribute('aria-live', 'polite');
+    });
+    // Gradio's accordion headers toggle an .open class but no ARIA state.
+    document.querySelectorAll('.tts-pane > button.label-wrap').forEach((b) => {
+      const open = String(b.classList.contains('open'));
+      if (b.getAttribute('aria-expanded') !== open) b.setAttribute('aria-expanded', open);
+    });
+    syncToggle();
   };
-  new MutationObserver(hideWelcome).observe(document.body, { childList: true, subtree: true });
-  hideWelcome();
+  new MutationObserver(onDom).observe(document.body, {
+    childList: true, subtree: true, attributes: true, attributeFilter: ['class'],
+  });
+  onDom();
 
   // Ctrl/Cmd+Enter renders from whichever tab is showing.
   document.addEventListener('keydown', (e) => {
