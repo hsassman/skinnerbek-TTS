@@ -932,3 +932,21 @@ html { scrollbar-gutter: stable; }
    descendant with the page's body colour -- dark in light mode. Keep the
    masthead note's summary and body light. */
 .gradio-container .tts-head .tts-note, .gradio-container .tts-head .tts-note * { color: #e6eaf3 !important; }
+
+/* Read-aloud: a 4px left border on a 12px-radius box renders as a curved,
+   tapering bracket that bulges into the text. Use a straight inset bar. */
+.tts-readme {
+  position: relative; border-left-width: 1px !important; border-left-color: var(--tts-border) !important;
+  padding-left: calc(var(--tts-s5) + 8px) !important;
+}
+.tts-readme::before {
+  content: ""; position: absolute; left: var(--tts-s3); top: var(--tts-s4); bottom: var(--tts-s4);
+  width: 4px; border-radius: 2px; background: var(--tts-accent);
+}
+
+/* Theme toggle: pinned to the top-right of the hero, level with the title,
+   on a solid chip so it never floats over the brightest part of the banner. */
+.tts-hero { align-items: flex-start; }
+.tts-hero__brand { align-items: center; }
+.tts-hero__actions { align-self: flex-start; margin-top: 2px; }
+.tts-iconbtn { background: rgba(10,14,24,.78); border-color: rgba(255,255,255,.18); box-shadow: 0 4px 14px rgba(0,0,0,.35); }
