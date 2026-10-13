@@ -1,0 +1,15 @@
+Copyright (c) 2026 hsassman. All rights reserved.
+
+This software and its source code are proprietary and confidential. No licence,
+express or implied, is granted to use, copy, modify, merge, publish, distribute,
+sublicense or sell any part of it without the prior written permission of the
+copyright holder.
+
+Third-party components are not covered by this notice and remain under their
+own licences. In particular, the Qwen3-TTS models and the `qwen-tts` package are
+published by the Qwen team (Alibaba Cloud) under the Apache License 2.0 and are
+downloaded separately; they are not redistributed in this repository.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
