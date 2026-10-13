@@ -52,7 +52,7 @@ from common import (
     warn_if_instruct_ignored,
     write_wavs,
 )
-from voice_library import list_voices, load_voice, save_voice, voice_meta, voice_path
+from voice_library import delete_voice, list_voices, load_voice, save_voice, voice_meta, voice_path
 
 
 def add_text_args(parser: argparse.ArgumentParser, default_out: str) -> None:
@@ -324,9 +324,8 @@ def cmd_voices_show(args: argparse.Namespace) -> int:
 
 def cmd_voices_remove(args: argparse.Namespace) -> int:
     path = voice_path(args.name)
-    if not path.exists():
+    if not delete_voice(args.name):
         raise SystemExit(f"No saved voice named '{args.name}'.")
-    path.unlink()
     print(f"Removed voice '{args.name}' ({path})")
     return 0
 

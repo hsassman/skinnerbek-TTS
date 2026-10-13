@@ -11,6 +11,7 @@ the UI and vice versa.
 """
 import json
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional
@@ -22,6 +23,22 @@ from common import VOICES_DIR
 
 def voice_path(name: str, voices_dir: Path = VOICES_DIR) -> Path:
     return Path(voices_dir) / f"{name}.pt"
+
+
+def ref_clip_path(name: str, voices_dir: Path = VOICES_DIR) -> Path:
+    """The cleaned reference clip a voice was built from (see refclip.prepare).
+    Kept beside the .pt so the voice can be auditioned and re-encoded later."""
+    return Path(voices_dir) / f"{name}.ref.wav"
+
+
+def delete_voice(name: str, voices_dir: Path = VOICES_DIR) -> bool:
+    """Remove a voice and its reference clip. False if there was no such voice."""
+    path = voice_path(name, voices_dir)
+    if not path.exists():
+        return False
+    path.unlink()
+    ref_clip_path(name, voices_dir).unlink(missing_ok=True)
+    return True
 
 
 def payload_from_items(items) -> dict:
@@ -89,6 +106,7 @@ def save_voice(
             # The speaker embedding is extracted by the Base model, so a voice is tied to
             # the size that made it -- see the mismatch warning in load_voice.
             "model_size": model_size,
+            "created": time.strftime("%Y-%m-%d %H:%M"),
         }
     )
     path = voice_path(name, voices_dir)
