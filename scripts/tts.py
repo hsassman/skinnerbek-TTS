@@ -38,14 +38,16 @@ Examples:
 import argparse
 import sys
 
+from audio_prompt_cache import encode_prompt
 from common import (
     OUTPUT_DIR,
     add_model_args,
     add_sampling_args,
     apply_seed,
     load_model,
-    read_lines,
+    read_script,
     sampling_kwargs,
+    synth,
     validate_ref_audio,
     warn_if_instruct_ignored,
     write_wavs,
@@ -67,14 +69,57 @@ def add_text_args(parser: argparse.ArgumentParser, default_out: str) -> None:
         "--gap-ms",
         type=int,
         default=300,
-        help="Silence between lines when using --join (default: 300)",
+        help="Silence between sentences when using --join (default: 300)",
+    )
+    parser.add_argument(
+        "--paragraph-gap-ms",
+        type=int,
+        default=650,
+        help="Silence between paragraphs (a blank line in the script) when using --join (default: 650)",
+    )
+    parser.add_argument(
+        "--no-normalize",
+        dest="normalize",
+        action="store_false",
+        help="Don't clean up the text before speaking (skip number/abbreviation expansion, "
+             "markdown stripping and long-sentence splitting). Use if the cleanup mangles something.",
+    )
+    parser.add_argument(
+        "--max-words",
+        type=int,
+        default=24,
+        help="Split any sentence longer than this at a clause boundary so the model doesn't rush "
+             "(default: 24; 0 disables clause splitting)",
+    )
+    parser.add_argument(
+        "--no-lexicon",
+        dest="lexicon",
+        action="store_false",
+        help="Ignore lexicon.txt pronunciation overrides for this run.",
+    )
+    parser.set_defaults(normalize=True, lexicon=True)
+    parser.add_argument(
+        "--lufs",
+        type=float,
+        default=-16.0,
+        help="Loudness target in LUFS every take is normalised to, one gain across all lines "
+             "(default: -16.0). 0 disables it and falls back to peak limiting only.",
     )
     parser.add_argument(
         "--peak",
         type=float,
         default=0.97,
-        help="Scale output down to this peak so it can't clip; one gain across all lines. "
-             "0 disables (default: 0.97)",
+        help="Scale output down to this peak so it can't clip; one gain across all lines, applied "
+             "after --lufs as a safety net. 0 disables (default: 0.97)",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=1,
+        help="Lines generated per model call. 1 (default) = one at a time, the lowest peak RAM "
+             "-- required on the 8GB box, where a whole batch pages to disk. 0 (or a big number) "
+             "= all lines in one batched call, faster where RAM is plentiful. Output for a given "
+             "seed differs between chunk sizes.",
     )
     parser.add_argument("--language", default="Auto", help="Language name, or Auto to detect (default: Auto)")
 
@@ -82,6 +127,30 @@ def add_text_args(parser: argparse.ArgumentParser, default_out: str) -> None:
 def report(paths, sample_rate: int) -> None:
     for p in paths:
         print(f"Wrote {p} ({sample_rate} Hz)")
+
+
+def line_progress(total: int):
+    """A synth on_progress callback that reports advancing lines to stderr."""
+    if total <= 1:
+        return None
+
+    def _cb(done: int, _total: int) -> None:
+        print(f"  ...{done}/{total} lines generated", file=sys.stderr)
+
+    return _cb
+
+
+def prepared_script(args: argparse.Namespace):
+    """(lines, gaps) after text cleanup + sentence/paragraph segmentation."""
+    return read_script(
+        args.text,
+        args.text_file,
+        normalize=args.normalize,
+        lexicon=args.lexicon,
+        max_words=args.max_words,
+        sentence_gap_ms=args.gap_ms,
+        paragraph_gap_ms=args.paragraph_gap_ms,
+    )
 
 
 def cmd_info(args: argparse.Namespace) -> int:
@@ -106,36 +175,40 @@ def cmd_info(args: argparse.Namespace) -> int:
 def cmd_preset(args: argparse.Namespace) -> int:
     # Read the script before loading: a model load is minutes on CPU, and a typo'd path or an
     # empty --text should fail now, not after the wait.
-    lines = read_lines(args.text, args.text_file)
+    lines, gaps = prepared_script(args)
     warn_if_instruct_ignored("CustomVoice", args, args.instruct)
     model = load_model("CustomVoice", args)
     apply_seed(args)
 
-    wavs, sr = model.generate_custom_voice(
-        text=lines,
+    wavs, sr = synth(
+        "preset", model, lines,
         language=args.language,
         speaker=args.speaker,
-        instruct=args.instruct or None,
-        **sampling_kwargs(args),
+        instruct=args.instruct,
+        sampling=sampling_kwargs(args),
+        chunk_size=args.chunk_size,
+        on_progress=line_progress(len(lines)),
     )
-    report(write_wavs(wavs, sr, args.out, args.join, args.gap_ms, args.peak), sr)
+    report(write_wavs(wavs, sr, args.out, args.join, args.gap_ms, args.peak, gaps=gaps, lufs=args.lufs), sr)
     return 0
 
 
 def cmd_design(args: argparse.Namespace) -> int:
     # --model-size is restricted to 1.7B at the parser level (see build_parser), so there's
     # nothing to override here -- argparse rejects 0.6B with a real message.
-    lines = read_lines(args.text, args.text_file)
+    lines, gaps = prepared_script(args)
     model = load_model("VoiceDesign", args)
     apply_seed(args)
 
-    wavs, sr = model.generate_voice_design(
-        text=lines,
+    wavs, sr = synth(
+        "design", model, lines,
         language=args.language,
         instruct=args.instruct,
-        **sampling_kwargs(args),
+        sampling=sampling_kwargs(args),
+        chunk_size=args.chunk_size,
+        on_progress=line_progress(len(lines)),
     )
-    report(write_wavs(wavs, sr, args.out, args.join, args.gap_ms, args.peak), sr)
+    report(write_wavs(wavs, sr, args.out, args.join, args.gap_ms, args.peak, gaps=gaps, lufs=args.lufs), sr)
     return 0
 
 
@@ -169,29 +242,33 @@ def cmd_clone(args: argparse.Namespace) -> int:
 
     # Everything above is checked before the load: it's minutes on CPU, so bad input should
     # fail immediately rather than after the wait.
-    lines = read_lines(args.text, args.text_file)
+    lines, gaps = prepared_script(args)
 
     model = load_model("Base", args)
     apply_seed(args)
 
     if args.voice:
         prompt = load_voice(args.voice, expect_model_size=args.model_size)
-        wavs, sr = model.generate_voice_clone(
-            text=lines,
-            language=args.language,
-            voice_clone_prompt=prompt,
-            **sampling_kwargs(args),
-        )
     else:
-        wavs, sr = model.generate_voice_clone(
-            text=lines,
-            language=args.language,
-            ref_audio=args.ref_audio,
-            ref_text=args.ref_text,
-            x_vector_only_mode=args.x_vector_only,
-            **sampling_kwargs(args),
+        # Ad-hoc reference clip: encode it once and cache the result, so repeat
+        # takes of the same clip skip the (slow, identical) encoding step.
+        prompt, _ = encode_prompt(
+            model,
+            args.ref_audio,
+            args.ref_text,
+            args.x_vector_only,
+            args.model_size,
+            use_cache=not args.no_cache,
         )
-    report(write_wavs(wavs, sr, args.out, args.join, args.gap_ms, args.peak), sr)
+    wavs, sr = synth(
+        "clone", model, lines,
+        language=args.language,
+        voice_clone_prompt=prompt,
+        sampling=sampling_kwargs(args),
+        chunk_size=args.chunk_size,
+        on_progress=line_progress(len(lines)),
+    )
+    report(write_wavs(wavs, sr, args.out, args.join, args.gap_ms, args.peak, gaps=gaps, lufs=args.lufs), sr)
     return 0
 
 
@@ -301,6 +378,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--x-vector-only",
         action="store_true",
         help="Clone timbre from the speaker embedding alone, no transcript needed. Lower fidelity.",
+    )
+    p_clone.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Don't read or write the cached encoding of --ref-audio (re-encode from scratch).",
     )
     add_model_args(p_clone, "Base")
     add_sampling_args(p_clone)

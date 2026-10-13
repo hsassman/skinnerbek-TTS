@@ -24,6 +24,42 @@ def voice_path(name: str, voices_dir: Path = VOICES_DIR) -> Path:
     return Path(voices_dir) / f"{name}.pt"
 
 
+def payload_from_items(items) -> dict:
+    """Serialisable `{"items": [...]}` for `torch.save` (no meta). Shared with the
+    ad-hoc reference-clip cache in audio_prompt_cache.py."""
+    return {"items": [asdict(it) for it in items]}
+
+
+def rebuild_items(payload: dict) -> List:
+    """Turn a saved `{"items": [...]}` payload back into VoiceClonePromptItem objects."""
+    from qwen_tts import VoiceClonePromptItem
+
+    if not isinstance(payload, dict) or "items" not in payload:
+        raise ValueError("not a valid voice payload (missing 'items')")
+
+    items = []
+    for d in payload["items"]:
+        ref_code = d.get("ref_code")
+        if ref_code is not None and not torch.is_tensor(ref_code):
+            ref_code = torch.tensor(ref_code)
+        ref_spk = d.get("ref_spk_embedding")
+        if ref_spk is None:
+            raise ValueError("payload item is missing ref_spk_embedding")
+        if not torch.is_tensor(ref_spk):
+            ref_spk = torch.tensor(ref_spk)
+        xvec_only = bool(d.get("x_vector_only_mode", False))
+        items.append(
+            VoiceClonePromptItem(
+                ref_code=ref_code,
+                ref_spk_embedding=ref_spk,
+                x_vector_only_mode=xvec_only,
+                icl_mode=bool(d.get("icl_mode", not xvec_only)),
+                ref_text=d.get("ref_text"),
+            )
+        )
+    return items
+
+
 def list_voices(voices_dir: Path = VOICES_DIR) -> List[str]:
     voices_dir = Path(voices_dir)
     if not voices_dir.exists():
@@ -42,21 +78,19 @@ def save_voice(
     voices_dir = Path(voices_dir)
     voices_dir.mkdir(parents=True, exist_ok=True)
 
-    payload = {
-        "items": [asdict(it) for it in items],
-        # Not read back by the demo, but makes `voices show` useful.
-        "meta": json.dumps(
-            {
-                "name": name,
-                "ref_audio": str(ref_audio),
-                "ref_text": items[0].ref_text,
-                "x_vector_only_mode": bool(items[0].x_vector_only_mode),
-                # The speaker embedding is extracted by the Base model, so a voice is tied to
-                # the size that made it -- see the mismatch warning in load_voice.
-                "model_size": model_size,
-            }
-        ),
-    }
+    payload = payload_from_items(items)
+    # Not read back by the demo, but makes `voices show` useful.
+    payload["meta"] = json.dumps(
+        {
+            "name": name,
+            "ref_audio": str(ref_audio),
+            "ref_text": items[0].ref_text,
+            "x_vector_only_mode": bool(items[0].x_vector_only_mode),
+            # The speaker embedding is extracted by the Base model, so a voice is tied to
+            # the size that made it -- see the mismatch warning in load_voice.
+            "model_size": model_size,
+        }
+    )
     path = voice_path(name, voices_dir)
     torch.save(payload, path)
     return path
@@ -68,8 +102,6 @@ def load_voice(
     expect_model_size: Optional[str] = None,
 ) -> List:
     """Rebuild VoiceClonePromptItem objects for `generate_voice_clone(voice_clone_prompt=...)`."""
-    from qwen_tts import VoiceClonePromptItem
-
     path = voice_path(name, voices_dir)
     if not path.exists():
         known = list_voices(voices_dir)
@@ -77,8 +109,6 @@ def load_voice(
         raise SystemExit(f"No saved voice named '{name}' at {path}.{hint}")
 
     payload = torch.load(path, map_location="cpu", weights_only=True)
-    if not isinstance(payload, dict) or "items" not in payload:
-        raise SystemExit(f"{path} is not a valid voice file (missing 'items').")
 
     if expect_model_size:
         saved_size = (voice_meta(name, voices_dir) or {}).get("model_size")
@@ -91,28 +121,10 @@ def load_voice(
                 file=sys.stderr,
             )
 
-    items = []
-    for d in payload["items"]:
-        ref_code = d.get("ref_code")
-        if ref_code is not None and not torch.is_tensor(ref_code):
-            ref_code = torch.tensor(ref_code)
-        ref_spk = d.get("ref_spk_embedding")
-        if ref_spk is None:
-            raise SystemExit(f"{path} is missing ref_spk_embedding.")
-        if not torch.is_tensor(ref_spk):
-            ref_spk = torch.tensor(ref_spk)
-
-        xvec_only = bool(d.get("x_vector_only_mode", False))
-        items.append(
-            VoiceClonePromptItem(
-                ref_code=ref_code,
-                ref_spk_embedding=ref_spk,
-                x_vector_only_mode=xvec_only,
-                icl_mode=bool(d.get("icl_mode", not xvec_only)),
-                ref_text=d.get("ref_text"),
-            )
-        )
-    return items
+    try:
+        return rebuild_items(payload)
+    except ValueError as e:
+        raise SystemExit(f"{path}: {e}")
 
 
 def voice_meta(name: str, voices_dir: Path = VOICES_DIR) -> Optional[dict]:
