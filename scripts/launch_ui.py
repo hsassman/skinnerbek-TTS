@@ -1,22 +1,27 @@
-"""Launch the bundled qwen_tts Gradio UI with settings that work on this machine.
+"""Launch a Qwen3-TTS web UI with settings that work on this machine.
 
-The UI that ships with qwen_tts (`qwen-tts-demo`) defaults to --device cuda:0
-and FlashAttention-2, neither of which exists here (AMD GPU, CPU-only torch, no
-flash-attn). Running it unmodified fails. This wrapper flips those defaults to
-cpu/no-flash-attn and picks a dtype that fits in RAM (see common.resolve_dtype:
-the 1.7B models need bfloat16 on this 8GB box).
+Two UIs are available:
 
-One checkpoint per process -- the UI renders whichever capability the loaded model
-supports, so pick the one you want:
+    python scripts/launch_ui.py            # the simple all-in-one app (scripts/app.py)
+    python scripts/launch_ui.py preset     # the bundled qwen_tts demo, preset voices
+    python scripts/launch_ui.py design     # the bundled qwen_tts demo, voice design (1.7B)
+    python scripts/launch_ui.py clone      # the bundled qwen_tts demo, cloning + save/load
 
-    python scripts/launch_ui.py preset   # built-in speakers + style instructions
-    python scripts/launch_ui.py design   # design a voice from a description (1.7B)
-    python scripts/launch_ui.py clone    # clone from reference audio, save/load voices
+With no mode this hands off to `scripts/app.py`: one page with a script box, a
+voice list (built-in speakers plus anything you've saved), a "describe a voice"
+tab and a "voice library" tab. That's the one to use unless you specifically
+want the original demo.
 
-Generation is slow on CPU -- expect tens of seconds to minutes per line. The UI's
-"Save / Load Voice" tab (clone mode) writes the same .pt format that
-`tts.py voices` uses, so voices are shareable between the two; save from the UI
-into voices/ to have `tts.py clone --voice <name>` pick it up.
+The bundled demo (`qwen-tts-demo`) defaults to --device cuda:0 and
+FlashAttention-2, neither of which exists here (AMD GPU, CPU-only torch, no
+flash-attn). Running it unmodified fails. The mode wrappers below flip those
+defaults to cpu/no-flash-attn and pick a dtype that fits in RAM (see
+common.resolve_dtype: the 1.7B models need bfloat16 on this 8GB box). One
+checkpoint per process.
+
+Generation is slow on CPU -- expect tens of seconds to minutes per line. Voices
+are saved in the same .pt format either UI and `tts.py voices` all use, so a
+voice made in one place works everywhere; save into voices/ to share it.
 """
 import argparse
 import sys
@@ -39,16 +44,41 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("mode", choices=sorted(KINDS), help="Which capability to load the UI for")
+    parser.add_argument(
+        "mode",
+        nargs="?",
+        choices=sorted(KINDS),
+        help="Bundled-demo capability to load. Omit for the simple all-in-one app (scripts/app.py).",
+    )
     parser.add_argument("--port", type=int, default=8000, help="Port to serve on (default: 8000)")
     parser.add_argument("--ip", default="127.0.0.1", help="Bind address (default: 127.0.0.1, local only)")
     parser.add_argument("--share", action="store_true", help="Create a public Gradio link")
+    parser.add_argument("--chunk-size", type=int, default=1,
+                        help="(all-in-one app only) lines generated per model call; "
+                             "1 = lowest RAM, 0 = one batch. See scripts/app.py.")
     add_model_args(parser)
     # `mode` is positional, so --model-size can't be restricted per-kind at parse time the way
     # tts.py does it. Default to None and resolve below, so we only complain when the size was
     # actually asked for rather than on every design run.
     parser.set_defaults(model_size=None)
     args = parser.parse_args()
+
+    if args.mode is None:
+        # No capability picked -> the simple all-in-one app. Forward the flags it shares.
+        app_argv = ["app.py", "--host", args.ip, "--port", str(args.port), "--device", args.device]
+        if args.share:
+            app_argv.append("--share")
+        if args.offline:
+            app_argv.append("--offline")
+        if getattr(args, "low_memory", False):
+            app_argv.append("--low-memory")
+        app_argv += ["--chunk-size", str(args.chunk_size)]
+        if getattr(args, "threads", None):
+            app_argv += ["--threads", str(args.threads)]
+        sys.argv = app_argv
+        import app  # local module; scripts/ is on sys.path (same as `from common import ...` above)
+
+        return app.main()
 
     kind = KINDS[args.mode]
     available = MODEL_SIZES[kind]
