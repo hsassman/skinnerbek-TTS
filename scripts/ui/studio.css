@@ -7,8 +7,8 @@
    boundaries >= 3:1. Status is always icon/word + colour, never colour alone.
 
    Gradio 6 toggles a `.dark` class on <body> (it ships no prefers-color-scheme
-   rules), so dark tokens key off `.dark`. The masthead is always ink, so it
-   carries the dark tokens in both themes.
+   rules), so dark tokens key off `.dark`. The masthead follows the theme:
+   a night banner on ink in dark mode, the dawn banner on cream in light.
    ========================================================================= */
 :root {
   /* Colour: surfaces */
@@ -88,8 +88,8 @@
   /* Gradio's own accent (sliders, loaders) follows ours. */
   --color-accent: var(--tts-accent);
 }
-/* The masthead is always dark ink, so it carries the dark tokens in both themes. */
-.dark, .gradio-container .tts-head {
+/* Dark theme. The masthead follows the theme too: ink at night, cream at dawn. */
+.dark {
   --tts-bg:          #0a0e18;
   --tts-surface:     #111725;
   --tts-surface-2:   #151c2d;
@@ -142,7 +142,9 @@
 body, .gradio-container { background: var(--tts-bg) !important; }
 .gradio-container { width: 100% !important; max-width: 1320px !important; margin-inline: auto !important; font-size: var(--tts-fs-base); }
 .gradio-container .main { gap: 0 !important; }
-footer { display: none !important; }   /* our own footer says what matters */
+/* Gradio's footer; ours says what matters. Not the tour popover's button row,
+   which driver.js also builds as a <footer>. */
+footer:not(.driver-popover-footer) { display: none !important; }
 ::selection { background: rgba(255,107,90,.28); }
 .gradio-container .block { border-radius: var(--tts-r-sm) !important; }
 .gradio-container label > span, .gradio-container .label-wrap span { font-weight: 620 !important; }
@@ -328,44 +330,6 @@ footer { display: none !important; }   /* our own footer says what matters */
 }
 .tts-title__ico svg { width: 20px; height: 20px; }
 
-.tts-sec {
-  display: flex; align-items: center; gap: var(--tts-s3);
-  margin: var(--tts-s2) 0 calc(-1 * var(--tts-s2));
-  animation: tts-fade .3s var(--tts-ease) both;
-}
-.tts-sec h2, .tts-sec h3 {
-  margin: 0; font-size: var(--tts-fs-xs); font-weight: 750;
-  text-transform: uppercase; letter-spacing: .08em; color: var(--tts-faint); white-space: nowrap;
-}
-.tts-sec::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--tts-border); }
-.tts-sec__n {
-  display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: var(--tts-r-xs);
-  font-size: var(--tts-fs-xs); font-weight: 750; color: var(--tts-on-grad); background: var(--tts-grad);
-}
-
-/* ===========================================================================
-   Welcome strip (first visit)
-   =========================================================================== */
-.tts-welcome {
-  position: relative; padding: var(--tts-s5) 64px var(--tts-s5) var(--tts-s5); border-radius: var(--tts-r);
-  background: var(--tts-grad-soft), var(--tts-surface); border: 1px solid var(--tts-border);
-  animation: tts-rise .4s var(--tts-ease) both;
-}
-.tts-welcome[hidden] { display: none; }
-.tts-welcome__steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: var(--tts-s5); }
-.tts-step { display: flex; gap: var(--tts-s3); align-items: flex-start; font-size: var(--tts-fs-base); line-height: 1.5; color: var(--tts-text); }
-.tts-step b { display: block; font-weight: 700; margin-bottom: 2px; }
-.tts-step span { color: var(--tts-muted); }
-.tts-step i {
-  font-style: normal; flex: none; display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: var(--tts-r-xs);
-  font-weight: 800; font-size: var(--tts-fs-sm); color: var(--tts-on-grad); background: var(--tts-grad);
-}
-.tts-welcome__x {
-  position: absolute; top: var(--tts-s3); right: var(--tts-s3); width: 40px; height: 40px; border-radius: var(--tts-r-xs);
-  border: 1px solid transparent; cursor: pointer; background: transparent; color: var(--tts-muted); font-size: 22px; line-height: 1;
-  transition: background var(--tts-dur-fast) var(--tts-ease), color var(--tts-dur-fast) var(--tts-ease), border-color var(--tts-dur-fast) var(--tts-ease);
-}
-.tts-welcome__x:hover { background: var(--tts-surface); color: var(--tts-text); border-color: var(--tts-border); }
 kbd {
   font: 600 var(--tts-fs-xs)/1 "JetBrains Mono", Consolas, ui-monospace, monospace; padding: 3px 6px; border-radius: 6px;
   background: var(--tts-surface); border: 1px solid var(--tts-ui-border); border-bottom-width: 2px; color: var(--tts-text);
@@ -775,7 +739,6 @@ kbd {
 }
 @media (max-width: 900px) {
   .tts-hero__art { opacity: .35; width: 100%; }
-  .tts-welcome__steps { grid-template-columns: 1fr; gap: var(--tts-s4); }
   .tts-qa__stats { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .gradio-container .tts-card--sticky { position: static; }
 }
@@ -785,7 +748,6 @@ kbd {
   .tts-hero { min-height: 0; }
   .tts-hero h1 { font-size: var(--tts-fs-2xl); }
   .tts-logo { width: 48px; height: 48px; }
-  .tts-welcome { padding: var(--tts-s4) 56px var(--tts-s4) var(--tts-s4); }
   .gradio-container .tts-tabs .tab-container { display: flex !important; overflow-x: auto; scrollbar-width: thin; }
   .gradio-container .tts-tabs .tab-container button { flex: none; }
 }
@@ -838,7 +800,7 @@ kbd {
 /* gr.HTML wraps content in a 12px-padded container. Titles, panels and the
    recorder inside a card share the inputs' left edge; the welcome strip and
    footer share the cards' edge. */
-.gradio-container .html-container:has(.tts-welcome, .tts-foot),
+.gradio-container .html-container:has(.tts-foot),
 .gradio-container .tts-card .html-container { padding-left: 0 !important; padding-right: 0 !important; }
 
 /* ===========================================================================
@@ -946,3 +908,204 @@ html { scrollbar-gutter: stable; }
    12px content box and pushed the 20px icon 5px off-centre. */
 .gradio-container .tts-iconbtn { padding: 0 !important; }
 .tts-iconbtn svg { flex: none; display: block; }
+
+/* ===========================================================================
+   Round 4: theme-aware masthead, clone-first landing, transcript, voice read,
+   guided tour
+   =========================================================================== */
+/* Masthead, light theme: the dawn banner on cream. Same layers as the night
+   version -- a wash from the left for the text, one from the bottom for the
+   stats -- so the two themes share one composition. */
+body:not(.dark) .gradio-container .tts-head {
+  border-color: var(--tts-border) !important;
+  box-shadow: 0 1px 2px rgba(23,26,38,.05), 0 12px 32px rgba(191,54,38,.08) !important;
+  background:
+    linear-gradient(90deg, #f8f4ef 24%, rgba(248,244,239,.82) 42%, rgba(248,244,239,.15) 66%, rgba(248,244,239,0) 82%),
+    linear-gradient(0deg, #f8f4ef 0%, #f8f4ef 34%, rgba(248,244,239,.6) 52%, rgba(248,244,239,0) 72%),
+    var(--tts-hero-img, none) right top / auto 300px no-repeat,
+    radial-gradient(90% 120% at 0% 100%, rgba(255,107,90,.08), transparent 60%),
+    #f8f4ef !important;
+}
+/* Gradio copies every custom rule under a `.gradio-container.gradio-container-x .contain`
+   prefix that outranks a selector starting at <body>, so the light-theme overrides
+   below are !important. They only ever match without .dark, so nothing else is lost. */
+body:not(.dark) .tts-hero h1 { color: var(--tts-text) !important; }
+/* The bright brand gradient is ~1.7:1 on cream; this deeper run keeps the
+   28px bold word above 3:1 at its lightest stop. */
+body:not(.dark) .tts-hero h1 span { background-image: linear-gradient(135deg, #c8361f 0%, #c2501a 50%, #a85f00 100%) !important; }
+body:not(.dark) .tts-hero p { color: #4a5266 !important; }
+body:not(.dark) .tts-badge { color: #8f3313 !important; background: rgba(232,80,63,.08) !important; border-color: rgba(191,54,38,.30) !important; }
+body:not(.dark) :is(.tts-iconbtn, .tts-textbtn) { color: var(--tts-text) !important; background: rgba(255,255,255,.88) !important; border-color: rgba(23,26,38,.16) !important; box-shadow: 0 2px 10px rgba(23,26,38,.08) !important; }
+body:not(.dark) :is(.tts-iconbtn, .tts-textbtn):hover { background: #fff !important; border-color: var(--tts-accent) !important; color: var(--tts-accent) !important; }
+body:not(.dark) .tts-hstat { background: rgba(255,255,255,.74) !important; border-color: rgba(23,26,38,.10) !important; }
+body:not(.dark) .tts-hstat span { color: var(--tts-faint) !important; }
+body:not(.dark) .gradio-container .tts-hstat b { color: var(--tts-text) !important; }
+body:not(.dark) .tts-hstat--ok   { background: rgba(16,103,59,.06) !important; border-color: rgba(16,103,59,.30) !important; }
+body:not(.dark) .tts-hstat--warn { background: rgba(133,80,11,.06) !important; border-color: rgba(133,80,11,.32) !important; }
+body:not(.dark) .gradio-container .tts-hstat--ok b   { color: var(--tts-ok) !important; }
+body:not(.dark) .gradio-container .tts-hstat--warn b { color: var(--tts-warn) !important; }
+body:not(.dark) .gradio-container .tts-head .tts-note,
+body:not(.dark) .gradio-container .tts-head .tts-note * { color: var(--tts-text) !important; }
+body:not(.dark) .tts-head .tts-note { background: rgba(255,255,255,.72) !important; border-color: rgba(23,26,38,.14) !important; }
+body:not(.dark) .tts-head .tts-note--warn { background: rgba(253,241,222,.85) !important; border-color: rgba(133,80,11,.40) !important; }
+body:not(.dark) .tts-head :focus-visible { outline-color: var(--tts-accent) !important; }
+
+/* "Take the tour": same chrome as the theme toggle, with a label. */
+.tts-hero__actions { align-items: center; }
+.tts-textbtn {
+  display: inline-flex; align-items: center; gap: var(--tts-s2); height: 44px; padding: 0 var(--tts-s4) !important;
+  border-radius: var(--tts-r-sm); cursor: pointer; font: inherit; font-size: var(--tts-fs-base); font-weight: 650;
+  white-space: nowrap; flex: none; color: #eef1f8; background: rgba(10,14,24,.78); border: 1px solid rgba(255,255,255,.18);
+  box-shadow: 0 4px 14px rgba(0,0,0,.35); backdrop-filter: blur(6px);
+  transition: background var(--tts-dur-fast) var(--tts-ease), border-color var(--tts-dur-fast) var(--tts-ease), color var(--tts-dur-fast) var(--tts-ease);
+}
+.tts-textbtn:hover { background: rgba(255,255,255,.12); border-color: rgba(255,255,255,.4); }
+.tts-textbtn svg { width: 18px; height: 18px; flex: none; }
+.gradio-container .tts-textbtn svg, .gradio-container .tts-textbtn svg * { color: inherit !important; stroke: currentColor !important; fill: none !important; }
+
+/* The landing card: the one thing to do first, so it carries the brand. */
+.gradio-container .tts-card--feature {
+  border-color: color-mix(in srgb, var(--tts-accent) 38%, var(--tts-border)) !important;
+  background-image: var(--tts-grad-soft) !important;
+  box-shadow: var(--tts-shadow), 0 0 0 4px color-mix(in srgb, var(--tts-accent) 7%, transparent) !important;
+}
+
+/* Drop zone: the clip upload is the hero action, so it is big, dashed and
+   says what it takes. An empty gr.Audio renders a single upload button
+   (button.center); a loaded one renders the player instead. Gradio's own
+   "Drop Audio Here - or - Click to Upload" stays in the DOM as the button's
+   accessible name and is replaced visually by a plainer line. */
+/* Empty state only: the block's own panel would sit behind the dashed box. */
+.gradio-container .tts-card .tts-drop:has(button.center) { border: 0 !important; background: transparent !important; box-shadow: none !important; padding: 0 !important; }
+.gradio-container .tts-drop .audio-container:has(button.center) { height: auto !important; }
+.gradio-container .tts-drop button.center {
+  width: 100%; min-height: 196px !important; border: 2px dashed color-mix(in srgb, var(--tts-accent) 55%, var(--tts-ui-border)) !important;
+  border-radius: var(--tts-r) !important; background: var(--tts-surface) !important; cursor: pointer;
+  transition: border-color var(--tts-dur-fast) var(--tts-ease), background var(--tts-dur-fast) var(--tts-ease), box-shadow var(--tts-dur-fast) var(--tts-ease);
+}
+.gradio-container .tts-drop button.center:hover,
+.gradio-container .tts-drop button.center:focus-visible {
+  border-color: var(--tts-accent) !important; background: var(--tts-accent-weak) !important;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--tts-accent) 14%, transparent) !important; outline: none !important;
+}
+.gradio-container .tts-drop button.center .wrap { height: auto !important; flex: none !important; font-size: 0 !important; color: var(--tts-text) !important; gap: var(--tts-s2) !important; display: flex; flex-direction: column; align-items: center; }
+.gradio-container .tts-drop button.center .or { display: none !important; }
+.gradio-container .tts-drop button.center .icon-wrap {
+  display: grid; place-items: center; width: 56px !important; height: 56px !important; margin-bottom: var(--tts-s2);
+  border-radius: 50%; background: var(--tts-accent-weak); color: var(--tts-accent) !important;
+  animation: tts-pop .5s var(--tts-spring) both;
+}
+.gradio-container .tts-drop button.center .icon-wrap svg { width: 26px !important; height: 26px !important; }
+.gradio-container .tts-drop button.center .icon-wrap svg * { stroke: currentColor !important; color: inherit !important; }
+.gradio-container .tts-drop button.center { display: flex !important; flex-direction: column; align-items: center; justify-content: center; gap: var(--tts-s1); padding: var(--tts-s6) var(--tts-s5) !important; }
+.gradio-container .tts-drop button.center .wrap::after {
+  content: "Drop a voice clip here, or click to choose one";
+  font-size: var(--tts-fs-lg); font-weight: 700; line-height: 1.45; color: var(--tts-text); text-align: center;
+}
+.gradio-container .tts-drop button.center::after {
+  content: "MP3, WAV, M4A or FLAC · 10 to 20 seconds of clear speech";
+  font-size: var(--tts-fs-sm); font-weight: 500; color: var(--tts-muted); text-align: center;
+}
+/* The recorder sits behind a disclosure under the drop zone. */
+.gradio-container .tts-recpane { margin-top: var(--tts-s3) !important; }
+.gradio-container .tts-recpane > button.label-wrap { text-align: left !important; justify-content: space-between !important; }
+
+/* Transcript panel */
+.tts-asr {
+  display: grid; gap: var(--tts-s2); padding: var(--tts-s3) var(--tts-s4); border-radius: var(--tts-r-sm);
+  background: var(--tts-surface-2); border: 1px solid var(--tts-border); animation: tts-rise .3s var(--tts-ease) both;
+}
+.tts-asr--busy { grid-template-columns: auto 1fr; align-items: center; column-gap: var(--tts-s3); }
+.tts-asr--busy .tts-eq { grid-row: span 2; }
+.tts-asr--busy b { font-size: var(--tts-fs-md); }
+.tts-asr--busy span { color: var(--tts-muted); font-size: var(--tts-fs-sm); }
+.tts-asr__head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--tts-s2); }
+.tts-asr__ok { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; color: var(--tts-ok); font-size: var(--tts-fs-base); }
+.tts-asr__ok svg { width: 16px; height: 16px; }
+.gradio-container .tts-asr__ok svg, .gradio-container .tts-asr__ok svg * { color: inherit !important; stroke: currentColor !important; fill: none !important; }
+.tts-asr .tts-tags { margin: 0; }
+.tts-asr__words { margin: 0; font-size: var(--tts-fs-md); line-height: 1.7; color: var(--tts-text); }
+.gradio-container .tts-asr__words mark {
+  background: var(--tts-warn-weak); color: var(--tts-warn) !important; border-radius: 4px; padding: 0 3px;
+  text-decoration: underline wavy color-mix(in srgb, var(--tts-warn) 70%, transparent); text-underline-offset: 3px;
+}
+.tts-asr__hint { font-size: var(--tts-fs-sm); color: var(--tts-muted); line-height: 1.5; }
+
+/* Voice at a glance */
+.tts-prof { display: grid; gap: var(--tts-s4); animation: tts-rise .35s var(--tts-ease) both; }
+.tts-prof__line {
+  width: 100%; height: 72px; display: block; border-radius: var(--tts-r-sm); background: var(--tts-surface-2);
+  border: 1px solid var(--tts-border); padding: var(--tts-s2) 0; box-sizing: border-box;
+}
+.gradio-container .tts-prof__line polyline {
+  fill: none !important; stroke: var(--tts-accent) !important; stroke-width: 2 !important; vector-effect: non-scaling-stroke;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.tts-prof__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--tts-s2); }
+.tts-prof__tile {
+  display: flex; flex-direction: column; gap: 2px; padding: var(--tts-s3); border-radius: var(--tts-r-xs);
+  background: var(--tts-surface-2); border: 1px solid var(--tts-border); animation: tts-pop .3s var(--tts-ease) both;
+}
+.tts-prof__tile:nth-child(2) { animation-delay: .04s; } .tts-prof__tile:nth-child(3) { animation-delay: .08s; }
+.tts-prof__tile:nth-child(4) { animation-delay: .12s; } .tts-prof__tile:nth-child(5) { animation-delay: .16s; }
+.tts-prof__tile:nth-child(6) { animation-delay: .20s; }
+.tts-prof__tile small { font-size: var(--tts-fs-xs); font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--tts-faint); }
+.gradio-container .tts-prof__tile b { font-size: var(--tts-fs-lg); font-weight: 700; color: var(--tts-text) !important; }
+.tts-prof__tile span { font-size: var(--tts-fs-sm); color: var(--tts-muted); }
+.tts-prof__rec {
+  display: flex; gap: var(--tts-s3); align-items: flex-start; padding: var(--tts-s3) var(--tts-s4); border-radius: var(--tts-r-sm);
+  background: var(--tts-accent-weak); color: var(--tts-text); font-size: var(--tts-fs-base); line-height: 1.5;
+}
+.tts-prof__rec svg { width: 18px; height: 18px; flex: none; margin-top: 2px; }
+.gradio-container .tts-prof__rec svg, .gradio-container .tts-prof__rec svg * { color: var(--tts-accent) !important; stroke: currentColor !important; fill: none !important; }
+.tts-prof__notes { margin: 0; padding-left: 1.2em; color: var(--tts-muted); font-size: var(--tts-fs-sm); line-height: 1.5; }
+.tts-note svg { width: 16px; height: 16px; vertical-align: -3px; margin-right: 4px; }
+.gradio-container .tts-note svg, .gradio-container .tts-note svg * { color: inherit !important; stroke: currentColor !important; fill: none !important; }
+
+/* Guided tour (driver.js), in the app's own type and colours. */
+.driver-popover.skb-tour {
+  --driver-popover-font-family: "Plus Jakarta Sans", "Segoe UI", system-ui, sans-serif;
+  background: var(--tts-surface); color: var(--tts-text); border: 1px solid var(--tts-border);
+  border-radius: var(--tts-r); box-shadow: 0 20px 48px rgba(10,14,24,.28); padding: var(--tts-s5);
+  font-family: var(--driver-popover-font-family); max-width: 360px;
+}
+.dark .driver-popover.skb-tour { box-shadow: 0 20px 48px rgba(0,0,0,.6); }
+.driver-popover.skb-tour .driver-popover-title { font-size: var(--tts-fs-xl); font-weight: 750; letter-spacing: -.01em; color: var(--tts-text); padding-right: 28px; }
+.driver-popover.skb-tour .driver-popover-description { font-size: var(--tts-fs-base); line-height: 1.55; color: var(--tts-muted); margin-top: var(--tts-s2); }
+.driver-popover.skb-tour :is(.driver-popover-title, .driver-popover-description, button, label) { font-family: var(--driver-popover-font-family); }
+.driver-popover.skb-tour .driver-popover-progress-text { font-size: var(--tts-fs-xs); color: var(--tts-faint); font-weight: 650; }
+.driver-popover.skb-tour .driver-popover-footer { margin-top: var(--tts-s4); gap: var(--tts-s2); flex-wrap: wrap; }
+.driver-popover.skb-tour .driver-popover-footer button {
+  font: inherit; font-size: var(--tts-fs-sm); font-weight: 650; text-shadow: none; padding: 7px 14px; border-radius: var(--tts-r-xs);
+  background: var(--tts-surface); color: var(--tts-text); border: 1px solid var(--tts-ui-border);
+}
+.driver-popover.skb-tour .driver-popover-footer button:hover { border-color: var(--tts-accent); color: var(--tts-accent); }
+.driver-popover.skb-tour .driver-popover-footer .driver-popover-next-btn {
+  background: var(--tts-fill); color: var(--tts-on-fill); border-color: transparent;
+}
+.driver-popover.skb-tour .driver-popover-footer .driver-popover-next-btn:hover { color: var(--tts-on-fill); filter: brightness(1.06); }
+.driver-popover.skb-tour .driver-popover-close-btn { color: var(--tts-faint); width: 36px; height: 36px; }
+.driver-popover.skb-tour .driver-popover-close-btn:hover { color: var(--tts-text); }
+.driver-popover.skb-tour button:focus-visible { outline: 2px solid var(--tts-accent); outline-offset: 2px; }
+/* driver.js focuses the close button when a step opens; a quiet chip reads as
+   focus without looking like an error badge. */
+.driver-popover.skb-tour .driver-popover-close-btn:focus-visible { outline: 0; background: var(--tts-surface-2); border-radius: var(--tts-r-xs); color: var(--tts-text); }
+.driver-popover.skb-tour .driver-popover-arrow-side-left.driver-popover-arrow { border-left-color: var(--tts-surface); }
+.driver-popover.skb-tour .driver-popover-arrow-side-right.driver-popover-arrow { border-right-color: var(--tts-surface); }
+.driver-popover.skb-tour .driver-popover-arrow-side-top.driver-popover-arrow { border-top-color: var(--tts-surface); }
+.driver-popover.skb-tour .driver-popover-arrow-side-bottom.driver-popover-arrow { border-bottom-color: var(--tts-surface); }
+.skb-tour__skip {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--tts-s3); flex-wrap: wrap;
+  margin-top: var(--tts-s4); padding-top: var(--tts-s3); border-top: 1px solid var(--tts-border);
+  font-size: var(--tts-fs-sm); color: var(--tts-muted);
+}
+.skb-tour__skip label { display: inline-flex; align-items: center; gap: var(--tts-s2); cursor: pointer; }
+.skb-tour__skip input { width: 16px; height: 16px; accent-color: var(--tts-accent); margin: 0; }
+.driver-popover.skb-tour .skb-tour__skip button {
+  background: none; border: 0; padding: 4px 0; color: var(--tts-accent); cursor: pointer; font: inherit; font-weight: 650;
+  text-decoration: underline; text-underline-offset: 3px;
+}
+@media (max-width: 640px) {
+  .tts-textbtn span { display: none; }
+  .tts-textbtn { width: 44px; padding: 0 !important; justify-content: center; }
+}

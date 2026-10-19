@@ -25,9 +25,19 @@ Fine-tuning a dedicated accent model is the next stage (see [Status and roadmap]
   acronyms the model gets wrong. The web app reloads it live.
 - **Delivery presets** (steady / natural / expressive) and reproducible seeds.
 - **Loudness mastering** to −16 LUFS, so separate takes match in volume.
-- **Web app (Skinnerbek Studio).** Speak, Design a voice, Voice library, Recordings and Settings
-  tabs, in light and dark themes. It shows live per-line progress with an ETA, can stop safely
-  between lines, and has "Fix one line" repair. Finished takes can be restored after a restart.
+- **Web app (Skinnerbek Studio).** Opens on **Clone a voice**: drop in a clip or record
+  yourself, and the app writes out what was said, reads how the person speaks, saves the voice
+  and lets you hear it say anything, all on one screen. Speak, My voices, Design a voice,
+  Recordings and Settings tabs follow, in light and dark themes, with a skippable guided tour
+  for first-time visitors. Renders show live per-line progress with an ETA, stop safely between
+  lines, and have "Fix one line" repair.
+- **Automatic transcripts.** A clip is transcribed locally with Whisper as soon as it arrives,
+  word for word including "um" and "uh" (the cloning model hears them), tuned with South
+  African vocabulary and your lexicon. Words it was unsure of are highlighted for checking.
+  Accuracy was measured against hand-typed transcripts (see *Transcription* below).
+- **A read of the speaker's delivery.** Pitch and range, pace, pauses, fillers and clarity,
+  with a pitch contour. Each saved voice keeps it, and Speak uses it to set that voice's
+  delivery and sentence pauses automatically.
 - **Record a voice in the browser.** A guided recorder with a read-aloud passage, live level
   meter and target-length timer. Every clip gets a quality report (length, silence, clipping,
   loudness) before it becomes a voice.
@@ -76,7 +86,7 @@ this repository.
 | GPU | **Not required.** Runs CPU-only by default. A CUDA GPU can be used with `--device cuda:0` (not yet tested; CUDA version follows your PyTorch build) |
 | GPU VRAM | n/a on CPU. Roughly 2 GB for the 0.6B models and 4 GB for 1.7B in bfloat16 |
 | RAM | 8 GB minimum (0.6B models; 1.7B only in bfloat16 with other apps closed). **16–32 GB recommended** |
-| Disk | A few GB for the Hugging Face model cache (VoiceDesign 1.7B alone is ~3.5 GB) |
+| Disk | A few GB for the Hugging Face model cache (VoiceDesign 1.7B alone is ~3.5 GB), plus 0.5–1.6 GB for the speech-recognition models |
 
 Pinned dependency versions are in [requirements.txt](requirements.txt) (mirrored in
 [pyproject.toml](pyproject.toml)).
@@ -92,8 +102,10 @@ pip install -r requirements-dev.txt     # or requirements.txt for runtime only
 ```
 
 No API keys or environment variables are needed. The base models download from Hugging Face
-the first time each capability runs, then load from `%USERPROFILE%\.cache\huggingface`. Pass
-`--offline` after that.
+the first time each capability runs, then load from `%USERPROFILE%\.cache\huggingface`. The
+speech-recognition models download on the first transcription into
+`%USERPROFILE%\.cache\skinnerbek\whisper` (plain files: the Hugging Face cache's symlinks fail
+on Windows without Developer Mode). Pass `--offline` after that.
 
 ## Run
 
@@ -136,10 +148,12 @@ scripts/
   launch_ui.py           launches app.py, or the bundled qwen_tts demo
   feature_tour.py        narrated smoke test of the read-quality features
   refclip.py             reference-clip quality report and clean-up
+  transcribe.py          local speech-to-text (faster-whisper) and the speaker's delivery read
   mock_model.py          fast stand-in model for `app.py --mock` (UI development)
   ui/                    studio.css, studio.js, recorder.js: the web app's styles and browser code
-assets/                  logo, favicon, masthead banner
-tests/                   pytest suite (91 tests, no model download needed)
+  ui/vendor/             driver.js 1.8.0 (MIT) for the guided tour, bundled so it works offline
+assets/                  logo, favicon, masthead banners (night and dawn)
+tests/                   pytest suite (99 tests, no model download needed)
 lexicon.txt              pronunciation overrides
 samples/quick_test.txt   short script for smoke-testing an install
 samples/ voices/ output/ local-only: reference clips, voice fingerprints, generated audio (gitignored)
@@ -472,8 +486,19 @@ python app.py --mock          # development: a fast stand-in model, no checkpoin
 ```
 
 `python launch_ui.py` with no argument launches the same app. It has a light and a dark theme
-(toggle at the top right, remembered per browser), and **Ctrl+Enter** renders from the Speak or
-Design tab.
+(toggle at the top right, remembered per browser; the header banner changes with it, night or
+dawn over Table Mountain), and **Ctrl+Enter** renders from the Speak or Design tab.
+
+- **Clone a voice** (the landing tab): one screen from clip to hearing the new voice.
+  - A large drop zone takes an MP3, WAV, M4A or FLAC; **Or record yourself** opens the
+    browser recorder with a passage to read.
+  - The clip gets a **quality report** at once, then an automatic **transcript** in an
+    editable box, with any words the recogniser was unsure of highlighted above it. If you read
+    the on-screen passage, its exact wording is used instead.
+  - **Your voice at a glance** shows pitch, range, pace, pauses, fillers and clarity, a pitch
+    contour, and the delivery and pause it will use for this voice.
+  - Name it, press **Create my voice**, and **Hear your new voice** unlocks: type anything and
+    press Speak. The name is suggested from the file name.
 
 - **Speak**: write a script or start from a sample, pick a voice, press **Speak**.
   - A live counter shows words, sentences and roughly how long the read will be.
@@ -489,22 +514,63 @@ Design tab.
     number box into 0, so 0 can't double as a real seed.
 - **Design a voice**: invent a voice from a written description (VoiceDesign, 1.7B), with
   one-click description ideas and the same render column.
-- **Voice library**: clone a voice in four numbered steps.
-  1. **Name** the voice.
-  2. **Record** in the browser while reading the suggested passage, or **upload** a file.
-  3. **Transcript**: one click fills it in if you read the passage.
-  4. **Save**.
+- **My voices**: every cloned voice as a card (with its pitch and pace), plus a panel to
+  audition the clip it was made from, send it to Speak, or delete it with a two-step confirm.
+  Saves the same `voices\<name>.pt` the CLI reads.
 
-  As soon as a clip is in, a **quality report** grades it. It shows length (against the ideal
-  5–30 s), speech time, loudness and peak, and explains problems in words: silence, clipping,
-  too short or too long, mostly pauses. On save, the clip is trimmed of leading and trailing
-  silence, levelled, and kept as `voices/<name>.ref.wav` beside the voice, so it can be
-  auditioned later. Saved voices appear as cards. Each one can be auditioned, sent to the Speak
-  tab, or deleted with a two-step confirm. Saves the same `voices\<name>.pt` the CLI reads.
+  The **quality report** on the Clone tab shows length (against the ideal 5–30 s), speech
+  time, loudness and peak, and explains problems in words: silence, clipping, too short or too
+  long, mostly pauses. On save, the clip is trimmed of leading and trailing silence, levelled,
+  and kept as `voices/<name>.ref.wav` beside the voice, so it can be auditioned later.
 - **Recordings**: every finished read, newest first, with playback, **Download**, and a
   two-step **Delete**.
 - **Settings**: the machine report, restoring an earlier take, the pronunciation lexicon
   editor, and housekeeping.
+
+**Transcription.** `scripts/transcribe.py` runs [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
+locally (int8 on CPU). Two modes, under *Transcription options*: **Accurate** (Whisper
+large-v3-turbo, the default) and **Fast** (Whisper small). Choices made for cloning rather
+than dictation:
+
+- *Verbatim by default.* A disfluent prompt keeps "um" and "uh", because the cloning model
+  aligns the transcript against the audio it hears.
+- *Spoken numbers.* "24" is written "twenty-four", the way it was said; codes such as HTD-189
+  or MP3 are left alone.
+- *Tailored vocabulary.* South African words and place names, plus every plain pattern in
+  `lexicon.txt`, are passed as hotwords.
+- *Memory.* The recogniser is loaded on first use and freed before a voice model loads, so the
+  two never share the 8 GB.
+
+Accuracy was checked against the hand-typed transcripts of the four voices in this repo
+(advert and voice-over reads, 9–47 s), as word error rate after spelling numbers out on both
+sides so formatting doesn't count as an error. On this 8 GB, 2-core machine:
+
+| Mode | Mean WER | Time per clip | Extra RAM |
+|---|---|---|---|
+| Accurate (large-v3-turbo), plain Whisper | 6.5 % | 50–105 s | ~1 GB |
+| Fast (small), with the app's tuning | 8.9 % | 10–30 s | ~0.3 GB |
+| Fast (small), plain Whisper | 9.3 % | 10–30 s | ~0.3 GB |
+| Fast (small), tuning but no "um/uh" priming | 10.6 % | 10–30 s | ~0.3 GB |
+
+The app's tuning (verbatim priming, hotwords, spoken numbers) also helped turbo on the two clips
+re-run with it (11.9 % → 8.5 %, and 0 %); the other two weren't re-run. Turbo can still be
+confidently wrong ("light train" for "late train" at 98 % confidence), which is why the app
+asks for a read-through even when nothing is highlighted. Clip language defaults to English:
+Whisper's auto-detect labelled a Cape Town English clip as Afrikaans.
+
+Most remaining "errors" are spelling choices (Bancorp vs Bank Corp, HTD-189 vs HTD189), and
+at least one disagreement may be the hand-typed reference rather than the recogniser. Four
+clips is a small sample: treat these as a sanity check, not a benchmark.
+
+**Delivery read.** Pitch comes from YIN (librosa), gated on energy, with octave slips
+dropped; medians matched Praat to within 3 Hz on every clip here. Expressiveness is the
+10th–90th percentile pitch span in semitones (under 8 steady, 8–13 natural, over 13
+animated), which picks the suggested Delivery. Pace is words per minute over the speaking
+time, and the suggested sentence pause is the median pause after a full stop.
+
+**Guided tour.** First-time visitors get a short tour (driver.js) of the Clone tab and the
+tabs. It can be skipped at any step, has a "Don't show this again" box, and stops offering
+itself after three visits either way. **Take the tour** in the header replays it.
 
 **Recording in the browser.** The recorder is custom (`scripts/ui/recorder.js`) rather than
 Gradio's built-in microphone input. Gradio's recorder swallows permission and device errors, so
@@ -550,8 +616,9 @@ refers to, with a preview first.
 file changes, so a saved rule applies to the next generation with no restart.
 
 **Design assets.** The logo is inline SVG (it animates, and stays crisp at any size), and
-`assets/favicon.svg` is its static copy. The masthead banner (`assets/banner.webp`) was
-generated for the project; the app falls back to drawn SVG art without it. Styles and browser
+`assets/favicon.svg` is its static copy. The masthead banners (`assets/banner.webp` at night
+for the dark theme, `assets/banner-light.webp` at dawn for the light one) were generated for
+the project; the app falls back to drawn SVG art without them. Styles and browser
 behaviour live in `scripts/ui/` (`studio.css`, `studio.js`, `recorder.js`) as ordinary files.
 
 `python app.py --low-memory` forces 0.6B to bfloat16 (it also auto-enables when RAM is tight);

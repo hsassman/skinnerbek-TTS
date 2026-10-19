@@ -90,8 +90,11 @@ def save_voice(
     ref_audio: str,
     model_size: str = "0.6B",
     voices_dir: Path = VOICES_DIR,
+    profile: Optional[dict] = None,
 ) -> Path:
-    """Persist the prompt items from `model.create_voice_clone_prompt` under `name`."""
+    """Persist the prompt items from `model.create_voice_clone_prompt` under `name`.
+    `profile` is the speaker's delivery read (transcribe.VoiceProfile.to_dict()),
+    used to set sensible defaults whenever the voice is picked."""
     voices_dir = Path(voices_dir)
     voices_dir.mkdir(parents=True, exist_ok=True)
 
@@ -107,6 +110,7 @@ def save_voice(
             # the size that made it -- see the mismatch warning in load_voice.
             "model_size": model_size,
             "created": time.strftime("%Y-%m-%d %H:%M"),
+            **({"profile": profile} if profile else {}),
         }
     )
     path = voice_path(name, voices_dir)

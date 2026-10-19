@@ -278,6 +278,24 @@ def _expand_numbers(text: str) -> str:
     return text
 
 
+def spell_out_numbers(text: str) -> str:
+    """Numbers, money, times and percentages as words, nothing else touched.
+    Used on automatic transcripts: a cloning transcript should read the way
+    the clip *sounds* ("twenty-four", not "24"). Codes that mix letters and
+    digits (HTD-189, MP3, A4) are left as written: nobody says "HTD one
+    hundred and eighty-nine", and the person can't know how it was read."""
+    codes: List[str] = []
+
+    def keep(m: re.Match) -> str:
+        codes.append(m.group(0))
+        # One private-use character per code: no digits for the expander to see.
+        return chr(0xE000 + len(codes) - 1)
+
+    masked = re.sub(r"\b(?:[A-Za-z]+\d[A-Za-z0-9]*|[A-Z]{2,}-\d[A-Za-z0-9]*)\b", keep, text)
+    out = _expand_numbers(masked)
+    return re.sub("[\ue000-\uf8ff]", lambda m: codes[ord(m.group(0)) - 0xE000], out)
+
+
 def _decimalish(s: str) -> str:
     s = s.replace(",", "")
     if "." not in s:

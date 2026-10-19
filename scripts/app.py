@@ -4,10 +4,13 @@
 process, a bilingual UI, no notion of a script or a saved-voice library. This
 app is the friendlier front door:
 
+    * Clone       -- the front door: drop in a clip or record yourself, get an
+                     automatic transcript and a read of how you speak, save the
+                     voice and hear it say anything, all on one screen.
     * Speak       -- pick a voice, type a script, watch it render line by line,
                      redo any line you don't like.
+    * My voices   -- every cloned voice: audition, use, delete.
     * Design      -- invent a voice from a written description (VoiceDesign).
-    * Voices      -- record or upload a clip, check its quality, keep it as a voice.
     * Recordings  -- play back and download anything generated earlier.
     * Settings    -- machine report, pronunciation lexicon, housekeeping.
 
@@ -68,6 +71,7 @@ from common import (  # noqa: E402
 from session import cleanup_orphans, list_sessions, load_session, save_session  # noqa: E402
 from textprep import LEXICON_PATH  # noqa: E402
 import refclip  # noqa: E402
+import transcribe as asr  # noqa: E402
 from voice_library import (  # noqa: E402
     delete_voice, list_voices, load_voice, ref_clip_path, save_voice, voice_meta, voice_path,
 )
@@ -117,6 +121,10 @@ UI_DIR = Path(__file__).resolve().parent / "ui"
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 CSS = (UI_DIR / "studio.css").read_text(encoding="utf-8")
 STUDIO_JS = (UI_DIR / "studio.js").read_text(encoding="utf-8")
+# driver.js 1.8.0 (MIT, github.com/nilbuild/driver.js), vendored so the guided
+# tour works offline like the rest of the app.
+DRIVER_JS = (UI_DIR / "vendor" / "driver.js.iife.js").read_text(encoding="utf-8")
+DRIVER_CSS = (UI_DIR / "vendor" / "driver.css").read_text(encoding="utf-8")
 RECORDER_JS = (UI_DIR / "recorder.js").read_text(encoding="utf-8")
 
 APP_NAME = "Skinnerbek Studio"
@@ -137,6 +145,10 @@ _ICON_PATHS = {
     "broom": '<path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/>',
     "moon": '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>',
     "lock": '<rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+    "wave": '<path d="M2 12h2M6 8v8M10 4v16M14 7v10M18 10v4M22 12h0"/>',
+    "upload": '<path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/>',
+    "check": '<path d="M20 6L9 17l-5-5"/>',
+    "compass": '<circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2 5-5 2 2-5z"/>',
     "wifi_off": '<path d="M2 2l20 20M8.5 16.5a5 5 0 0 1 7 0M5 13a10 10 0 0 1 5.2-2.8M19 13a10 10 0 0 0-2.4-1.7M12 20h.01"/>',
 }
 
@@ -208,8 +220,14 @@ def _hero_css() -> str:
     """The generated banner (assets/banner.*) becomes the masthead's own
     background, so it fills the header edge to edge and is clipped by its
     rounded corners instead of floating as a box inside it."""
-    uri = _asset_uri("banner")
-    return f'\n.gradio-container .tts-head {{ --tts-hero-img: url("{uri}"); }}\n' if uri else ""
+    dark, light = _asset_uri("banner"), _asset_uri("banner-light")
+    css = ""
+    if dark:
+        css += f'\n.gradio-container .tts-head {{ --tts-hero-img: url("{dark}"); }}\n'
+    if light:
+        # The dawn version of the same scene, for the light theme.
+        css += f'\nbody:not(.dark) .gradio-container .tts-head {{ --tts-hero-img: url("{light}"); }}\n'
+    return css
 
 
 def _hero_art() -> str:
@@ -249,6 +267,8 @@ def get_model(kind: str, size: str):
     key = (kind, size, str(dtype))
     if key in _CACHE:
         return _CACHE[key]
+    # The speech recogniser (~1 GB) and a voice model don't both fit on 8 GB.
+    asr.unload()
     if CFG.mock:
         from mock_model import MockTTSModel
 
@@ -512,14 +532,6 @@ _EMPTY_ART = (
 def _idle_html(title: str = "Nothing rendering", msg: str = "", art: bool = True) -> str:
     body = f"<b>{escape(title)}</b>{escape(msg)}" if msg else f"<b>{escape(title)}</b>"
     return f'<div class="tts-empty">{_EMPTY_ART if art else ""}{body}</div>'
-
-
-def _sec(title: str, level: int = 2, n: Optional[int] = None) -> str:
-    """One section-heading rhythm for every tab: a small uppercase label with a
-    rule running to the edge, optionally numbered as a step."""
-    num = (f'<span class="tts-sec__n" aria-hidden="true">{n}</span><span class="tts-sr">Step {n}: </span>'
-           if n else "")
-    return f'<div class="tts-sec">{num}<h{level}>{escape(title)}</h{level}></div>'
 
 
 def _title(icon: str, title: str, sub: str = "") -> str:
@@ -869,14 +881,19 @@ def _voice_card_html(value: Optional[str]) -> str:
         meta = voice_meta(ref) or {}
         tags = ['<span class="tts-tag tts-tag--accent">Cloned</span>',
                 f'<span class="tts-tag">{escape(str(meta.get("model_size", "?")))}</span>',
-                '<span class="tts-tag">timbre only</span>' if meta.get("x_vector_only_mode")
+                '<span class="tts-tag">quick mode</span>' if meta.get("x_vector_only_mode")
                 else '<span class="tts-tag tts-tag--ok">full clone</span>']
+        prof = meta.get("profile") or {}
+        if prof.get("register"):
+            tags.append(f'<span class="tts-tag">{escape(prof["register"])} pitch</span>')
+        if prof.get("pace"):
+            tags.append(f'<span class="tts-tag">{escape(prof["pace"])} pace</span>')
         if meta.get("created"):
             tags.append(f'<span class="tts-tag">{escape(meta["created"])}</span>')
         said = (meta.get("ref_text") or "").strip()
         more = "…" if len(said) > 110 else ""
         desc = (f"Cloned from a reference clip: <q>{escape(said[:110])}{more}</q>"
-                if said else "Cloned from a reference clip, timbre only.")
+                if said else "Made from a clip without a transcript.")
     return (f'<div class="tts-vcard"><div class="tts-avatar" aria-hidden="true" style="--h:{_hue(label)}">'
             f"{escape(_initials(label))}</div><div><h3>{escape(label)}</h3><p>{desc}</p>"
             f'<div class="tts-tags">{"".join(tags)}</div></div></div>')
@@ -886,7 +903,7 @@ def _voices_gallery_html() -> str:
     names = list_voices()
     if not names:
         return _idle_html("No saved voices yet",
-                          " Record or upload a clip on the left and it will appear here.")
+                          " Create one on the Clone a voice tab and it will appear here.")
     return ('<div class="tts-gallery">'
             + "".join(_voice_card_html(f"voice:{n}") for n in names) + "</div>")
 
@@ -898,16 +915,19 @@ def _clip_report_html(path) -> str:
     try:
         r = refclip.analyze(path)
     except Exception as e:  # noqa: BLE001
-        return ('<div class="tts-qa tts-qa--unusable"><div class="tts-qa__grade">&#10007; Could not read '
-                f"this file</div><div>{escape(type(e).__name__)}: {escape(str(e))}. "
-                "Try a WAV, FLAC or MP3.</div></div>")
+        print(f"clip report: {type(e).__name__}: {e}", file=sys.stderr)
+        return ('<div class="tts-qa tts-qa--unusable"><div class="tts-qa__grade">&#10007; This file '
+                "couldn't be opened</div><div>Try an MP3, WAV, M4A or FLAC file.</div></div>")
     icon, verdict = {"good": ("&#10003;", "Great clip"), "usable": ("!", "Usable, with notes"),
                      "unusable": ("&#10007;", "This clip won't make a good voice")}[r.grade]
     span = 45.0
     mark = min(100.0, r.duration / span * 100)
     lo, hi = refclip.IDEAL_SECONDS
-    stats = [("Length", f"{r.duration:.1f}s"), ("Speech", f"{r.speech_seconds:.1f}s"),
-             ("Loudness", f"{r.rms_db:.0f} dBFS"), ("Peak", f"{r.peak_db:.1f} dBFS")]
+    volume = ("silent" if r.rms_db < refclip.SILENT_RMS_DB else
+              "too quiet" if r.rms_db < refclip.QUIET_RMS_DB else
+              "distorted" if r.clipped_pct > 0.05 else "good")
+    stats = [("Length", f"{r.duration:.1f} seconds"), ("Talking", f"{r.speech_seconds:.1f} seconds"),
+             ("Volume", volume)]
     issues = "".join(
         f'<li><strong>{"Problem" if lvl == "err" else "Note"}:</strong> {escape(m)}</li>'
         for lvl, m in r.issues)
@@ -915,7 +935,7 @@ def _clip_report_html(path) -> str:
     return (
         f'<div class="tts-qa tts-qa--{r.grade}" role="status">'
         f'<div class="tts-qa__head"><span class="tts-qa__grade">{icon} {verdict}</span>'
-        f'<span class="tts-tag">{r.sample_rate} Hz &middot; {channels}</span></div>'
+        f'<span class="tts-tag">{channels}</span></div>'
         f'<div class="tts-lenbar__cap"><span>Length</span><span>ideal {lo:.0f}&ndash;{hi:.0f} s, '
         f'shown in green</span></div>'
         f'<div class="tts-lenbar" role="img" aria-label="Length {r.duration:.1f} seconds; ideal is '
@@ -926,8 +946,7 @@ def _clip_report_html(path) -> str:
         + "".join(f'<div class="tts-stat"><small>{k}</small><b>{v}</b></div>' for k, v in stats)
         + "</div>"
         + (f"<ul>{issues}</ul>" if issues else
-           '<div style="font-size:.84rem">Clear, well-levelled and a good length. '
-           "Add the transcript and save.</div>")
+           '<div style="font-size:.84rem">Clear, well-levelled and a good length.</div>')
         + "</div>"
     )
 
@@ -936,24 +955,26 @@ def _bad(msg: str) -> str:
     return f'<div class="tts-note tts-note--err" role="alert">{msg}</div>'
 
 
-def do_add_voice(name, ref_audio, ref_text, xvec_only, size,
+def do_add_voice(name, ref_audio, ref_text, xvec_only, size, prof=None,
                  progress=gr.Progress(track_tqdm=True)):
-    """Returns (status html, speak voice dropdown, gallery html, manage dropdown)."""
-    keep = (gr.update(), gr.update(), gr.update())
-    name = (name or "").strip()
+    """Returns (status html, speak voice dropdown, gallery html, manage dropdown,
+    saved name -- None when nothing was saved)."""
+    keep = (gr.update(), gr.update(), gr.update(), None)
+    # "Auntie Faiza" is what people type; store it the way the CLI can use it.
+    name = "_".join((name or "").split())
     try:
         if not name:
             return (_bad("Give the voice a name."), *keep)
         if not name.replace("_", "").replace("-", "").isalnum():
-            return (_bad("Use only letters, numbers, - and _ in the name."), *keep)
+            return (_bad("Use only letters and numbers in the name, for example auntie_faiza."), *keep)
         if not ref_audio:
             return (_bad("Record or upload a reference clip first."), *keep)
         if not xvec_only and not (ref_text or "").strip():
-            return (_bad("Type the transcript of the clip (word for word), or tick "
-                         "<strong>timbre only</strong> to skip it (lower quality)."), *keep)
+            return (_bad("The transcript is empty. Wait for it to fill in, or type what is said "
+                         "in the clip word for word."), *keep)
         if voice_path(name).exists():
             return (_bad(f"A voice called <strong>{escape(name)}</strong> already exists. "
-                         "Pick another name or delete it on the right."), *keep)
+                         "Pick another name, or delete the old one under My voices."), *keep)
 
         progress(0.05, desc="Checking the clip…")
         clean, report = refclip.prepare(ref_audio, ref_clip_path(name))
@@ -970,20 +991,239 @@ def do_add_voice(name, ref_audio, ref_text, xvec_only, size,
             ref_text=((ref_text or "").strip() or None),
             x_vector_only_mode=bool(xvec_only),
         )
-        save_voice(name, items, ref_audio=str(clean), model_size=size)
+        save_voice(name, items, ref_audio=str(clean), model_size=size,
+                   profile=_strip_contour(prof))
         gr.Info(f"Saved the voice '{name}'.")
         names = list_voices()
-        return (f'<div class="tts-note tts-note--ok"><strong>Saved {escape(name)}.</strong> '
-                "It's selected on the Speak tab, ready to use.</div>",
+        return (f'<div class="tts-note tts-note--ok"><strong>{escape(name)} is ready.</strong> '
+                "Type something under <strong>Hear your new voice</strong> to try it. "
+                "It's also selected on the Speak tab.</div>",
                 gr.update(choices=voice_choices(), value=f"voice:{name}"),
                 _voices_gallery_html(),
-                gr.update(choices=names, value=name))
+                gr.update(choices=names, value=name),
+                name)
     except (Exception, SystemExit) as e:  # noqa: BLE001
         # A failed encode must not leave an orphaned clip behind.
         if name and not voice_path(name).exists():
             ref_clip_path(name).unlink(missing_ok=True)
-        return (_bad(f"<strong>Could not save the voice.</strong><br>"
-                     f"{escape(type(e).__name__)}: {escape(str(e))}"), *keep)
+        print(f"save voice: {type(e).__name__}: {e}", file=sys.stderr)
+        return (_bad("<strong>The voice couldn't be saved.</strong> Try again, or pick another "
+                     f"name.<br><small>Details: {escape(str(e))}</small>"), *keep)
+
+
+# ---------------------------------------------------------------------------
+# Automatic transcript and voice read (Clone tab)
+#
+# A clone is only as good as its transcript, and typing one word-for-word is
+# where people give up. So the moment a clip lands it is transcribed locally,
+# words the recogniser is unsure of are highlighted, and the person edits a
+# draft instead of starting from a blank box. The same pass reads how they
+# speak -- pitch, pace, pauses -- which then sets Speak's defaults for the voice.
+# ---------------------------------------------------------------------------
+ASR_QUALITY = {"Accurate": asr.DEFAULT_MODEL, "Fast": asr.FAST_MODEL}
+# English by default: Whisper's own detection hears a Cape Town accent (plus the
+# "ja" and "lekker" in our hotwords) as Afrikaans and labels English clips "af".
+ASR_LANGUAGE = {"English": "en", "Afrikaans": "af", "Detect automatically": None}
+_GENERIC_NAMES = {"recording", "audio", "blob", "voice", "clip", "sample", "untitled", "new"}
+
+
+def _suggest_name(path) -> Optional[str]:
+    """A voice name from the uploaded file's name, unless it says nothing."""
+    import re
+
+    stem = Path(str(path)).stem.lower()
+    stem = re.sub(r"[^a-z0-9]+", "_", stem).strip("_")[:24].strip("_")
+    if not stem or stem.startswith(("tmp", "_ref")) or stem in _GENERIC_NAMES or stem.isdigit():
+        return None
+    return stem
+
+
+def _asr_busy_html(quality: str) -> str:
+    first = "" if asr.is_loaded() else " The first clip also loads the speech model."
+    pace = (" Accurate mode can take a minute or two on a slower computer; Fast (under "
+            "Transcription options) is about four times quicker." if quality == "Accurate" else "")
+    return (f'<div class="tts-asr tts-asr--busy" role="status">{_EQ}'
+            f"<b>Listening to your clip&hellip;</b><span>Writing down every word.{first}{pace}"
+            "</span></div>")
+
+
+def _asr_html(t: "asr.Transcript", seconds: float, snapped: bool) -> str:
+    words = []
+    for w in t.words:
+        txt = escape(w.text)
+        if w.prob < asr.UNSURE_BELOW and not snapped:
+            words.append(f'<mark title="{w.prob:.0%} sure">{txt}</mark>')
+        else:
+            words.append(txt)
+    unsure = 0 if snapped else len(t.unsure)
+    lang = {"en": "English", "af": "Afrikaans", "zu": "isiZulu", "xh": "isiXhosa"}.get(
+        t.language, t.language.upper())
+    meta = (f'<span class="tts-tag">{escape(lang)}</span>'
+            f'<span class="tts-tag">{t.confidence:.0%} confident</span>'
+            f'<span class="tts-tag">{seconds:.0f}s</span>')
+    if snapped:
+        hint = ("You read the passage, so its exact wording is used below. Change it if you "
+                "went off-script.")
+    elif unsure:
+        hint = (f"{unsure} word{'s are' if unsure != 1 else ' is'} highlighted because the "
+                "transcriber wasn't sure. Play the clip, then fix "
+                f"{'them' if unsure != 1 else 'it'} in the box below.")
+    else:
+        # Not "every word is right": a recogniser can be confidently wrong
+        # ("light train" for "late train" in testing), so still ask for a read.
+        hint = ("Nothing was flagged as uncertain. Still read it once while the clip plays: "
+                "the voice learns from these exact words.")
+    body = (f'<p class="tts-asr__words">{" ".join(words)}</p>' if words and not snapped else "")
+    return (f'<div class="tts-asr" role="status"><div class="tts-asr__head">'
+            f'<span class="tts-asr__ok">{_icon("check")} Transcribed</span>'
+            f'<span class="tts-tags">{meta}</span></div>{body}'
+            f'<div class="tts-asr__hint">{hint}</div></div>')
+
+
+def _contour_svg(contour) -> str:
+    pts = [(i, v) for i, v in enumerate(contour or []) if v]
+    if len(pts) < 8:
+        return ""
+    n = max(1, len(contour) - 1)
+    vals = [v for _, v in pts]
+    lo, hi = min(vals), max(vals)
+    span = max(20.0, hi - lo)
+    segs, cur, prev = [], [], None
+    for i, v in pts:
+        if prev is not None and i - prev > 2 and cur:
+            segs.append(cur)
+            cur = []
+        cur.append(f"{i / n * 300:.1f},{54 - (v - lo) / span * 46:.1f}")
+        prev = i
+    if cur:
+        segs.append(cur)
+    paths = "".join(f'<polyline points="{" ".join(c)}"/>' for c in segs if len(c) > 1)
+    return (f'<svg class="tts-prof__line" viewBox="0 0 300 60" preserveAspectRatio="none" '
+            'role="img" aria-label="How the pitch rises and falls over the clip">'
+            f"{paths}</svg>")
+
+
+def _profile_html(p: Optional[dict]) -> str:
+    if not p:
+        return _idle_html("Nothing to read yet",
+                          " Add a clip and you'll see its pitch, pace and pauses here.")
+    def tile(label, value, sub=""):
+        return (f'<div class="tts-prof__tile"><small>{escape(label)}</small><b>{escape(value)}</b>'
+                f'{f"<span>{escape(sub)}</span>" if sub else ""}</div>')
+    tiles = []
+    if p.get("pitch_hz"):
+        tiles.append(tile("Pitch", f"{p.get('register', '').capitalize()} voice",
+                          f"around {p['pitch_hz']:.0f} Hz"))
+        tiles.append(tile("Tone", (p.get("expressiveness") or "").capitalize(),
+                          "how much the pitch moves"))
+    if p.get("wpm"):
+        tiles.append(tile("Pace", f"{p['wpm']:.0f}", f"words a minute, {p.get('pace', '')}"))
+    if p.get("wpm") is not None:
+        pause = f"about {p['pause_ms'] / 1000:.1f} seconds each" if p.get("pause_ms") else "none"
+        tiles.append(tile("Pauses", str(p.get("pauses", 0)), pause))
+        tiles.append(tile("Fillers", str(p.get("fillers", 0)), "um, uh, er"))
+    if p.get("clarity") is not None:
+        tiles.append(tile("Transcript", f"{p['clarity']:.0%} sure", "how sure the transcriber is"))
+    notes = "".join(f"<li>{escape(n)}</li>" for n in p.get("notes") or [])
+    return (
+        '<div class="tts-prof">'
+        f'{_contour_svg(p.get("contour"))}'
+        f'<div class="tts-prof__grid">{"".join(tiles)}</div>'
+        f'<div class="tts-prof__rec">{_icon("spark")}<span>Speak will use <b>'
+        f'{escape(p.get("delivery", "Natural"))}</b> delivery and a <b>'
+        f'{int(p.get("gap_ms", 300)) / 1000:.1f}-second</b> pause between sentences for this '
+        "voice, to suit how it speaks.</span></div>"
+        + (f'<ul class="tts-prof__notes">{notes}</ul>' if notes else "")
+        + "</div>"
+    )
+
+
+def do_transcribe(path, verbatim, quality, language, current_name):
+    """Clip -> (transcript status, transcript text, profile html, profile state,
+    name). A generator so the 'listening' state shows while it works."""
+    keep_name = gr.update()
+    if not path:
+        yield ("", gr.update(), _profile_html(None), None, keep_name)
+        return
+    quality = quality or "Accurate"
+    yield (_asr_busy_html(quality), gr.update(), gr.update(), gr.update(), gr.update())
+    started = time.time()
+    try:
+        t = asr.transcribe(
+            path, verbatim=bool(verbatim), model_name=ASR_QUALITY.get(quality, asr.DEFAULT_MODEL),
+            language=ASR_LANGUAGE.get(language or "English", "en"),
+            extra_hotwords=asr.lexicon_hotwords(LEXICON_PATH), offline=CFG.offline)
+    except asr.TranscriberUnavailable as e:
+        yield (f'<div class="tts-note tts-note--warn" role="alert">{escape(str(e))} Meanwhile, '
+               "type what is said in the clip below.</div>", gr.update(), gr.update(), None, keep_name)
+        return
+    except Exception as e:  # noqa: BLE001
+        print(f"transcribe: {type(e).__name__}: {e}", file=sys.stderr)
+        yield (_bad("<strong>The transcript couldn't be made.</strong> Type what is said in the "
+                    "clip below instead."),
+               gr.update(), gr.update(), None, keep_name)
+        return
+    text = t.text
+    snapped = asr.match_passage(text, READ_PASSAGE) >= 0.85
+    if snapped:
+        text = READ_PASSAGE
+    try:
+        prof = asr.profile(path, t)
+        prof_d = prof.to_dict()
+    except Exception:  # noqa: BLE001 -- the transcript matters more than the read
+        prof_d = None
+    name = keep_name
+    if not (current_name or "").strip():
+        sug = _suggest_name(path)
+        if sug and not voice_path(sug).exists():
+            name = sug
+    if not text.strip():
+        yield ('<div class="tts-note tts-note--warn" role="alert">No speech found in this clip. '
+               "Try a clip where someone is talking clearly.</div>", "", _profile_html(prof_d),
+               prof_d, name)
+        return
+    yield (_asr_html(t, time.time() - started, snapped), text, _profile_html(prof_d), prof_d, name)
+
+
+def _strip_contour(prof):
+    if not prof:
+        return None
+    return {k: v for k, v in prof.items() if k != "contour"}
+
+
+def _voice_defaults(value):
+    """Picking a cloned voice in Speak applies the delivery and pause read
+    from its clip, so it sounds like the person without any fiddling."""
+    if not value or not str(value).startswith("voice:"):
+        return gr.update(), gr.update()
+    prof = (voice_meta(value.split(":", 1)[1]) or {}).get("profile") or {}
+    if not prof:
+        return gr.update(), gr.update()
+    return (gr.update(value=prof.get("delivery", "Natural")),
+            gr.update(value=int(prof.get("gap_ms", 300))))
+
+
+def _try_ready(name):
+    """After a save: unlock the 'hear it' card and match its settings."""
+    if not name:
+        return gr.update(), gr.update(), gr.update()
+    prof = (voice_meta(name) or {}).get("profile") or {}
+    note = (f'<div class="tts-note tts-note--ok">{_icon("check")} Speaking as '
+            f"<strong>{escape(name)}</strong>"
+            + (f", with {escape(prof.get('delivery', 'Natural')).lower()} delivery" if prof else "")
+            + ".</div>")
+    return note, gr.update(interactive=True), gr.update(value=prof.get("delivery", "Natural"))
+
+
+def do_clone_try(name, script, delivery):
+    """The 'Hear your new voice' button: Speak, scoped to the voice just made."""
+    if not name:
+        yield (gr.update(), gr.update(), _bad("Create the voice first, then try it here."))
+        return
+    gap = int(((voice_meta(name) or {}).get("profile") or {}).get("gap_ms", 300))
+    for audio, prog, status, _state, _redo in do_speak(
+            f"voice:{name}", script, "0.6B", "Auto", "", delivery, True, gap, 650, 0):
+        yield audio, prog, status
 
 
 def do_pick_voice(name):
@@ -1226,32 +1466,20 @@ def _masthead_html() -> str:
         '<div class="tts-hero__brand">'
         f'<span class="tts-logo">{LOGO_SVG}</span>'
         f"<div><h1>Skinnerbek <span>Studio</span></h1>"
-        "<p>Natural South African voices, from Cape Flats to Constantia. Write a script, pick a "
-        "voice, press Speak.</p>"
+        "<p>Clone a South African voice from a short clip, then make it say anything. "
+        "Everything happens on this computer.</p>"
         '<div class="tts-hero__badges">'
         f'<span class="tts-badge">{_icon("lock")} Private: runs on this machine</span>'
         f'<span class="tts-badge">{_icon("wifi_off")} Works offline</span>'
         "</div></div></div>"
         '<div class="tts-hero__actions">'
+        f'<button class="tts-textbtn" type="button" data-skb="tour">{_icon("compass")}'
+        "<span>Take the tour</span></button>"
         f'<button class="tts-iconbtn" type="button" data-skb="theme" title="Dark theme" '
         f'aria-label="Dark theme" aria-pressed="false">{_icon("moon")}</button>'
         "</div></div>"
     )
 
-
-WELCOME_HTML = (
-    '<section class="tts-welcome" aria-label="Getting started"><ol class="tts-welcome__steps">'
-    '<li class="tts-step"><i aria-hidden="true">1</i><div><b>Write or paste a script</b>'
-    "<span>Or start from a sample. Long text is split into sentences for you.</span></div></li>"
-    '<li class="tts-step"><i aria-hidden="true">2</i><div><b>Pick a voice</b>'
-    "<span>Clone a real Cape Town voice in the Voice library for an authentic accent.</span></div></li>"
-    '<li class="tts-step"><i aria-hidden="true">3</i><div><b>Press Speak</b>'
-    "<span>Or <kbd>Ctrl</kbd> + <kbd>Enter</kbd>. Each line renders, then joins into one take.</span></div></li>"
-    "</ol>"
-    '<button class="tts-welcome__x" type="button" data-skb="welcome-close" '
-    'aria-label="Dismiss the getting-started steps">&times;</button>'
-    "</section>"
-)
 
 FOOTER_HTML = (
     '<div class="tts-foot">'
@@ -1306,10 +1534,10 @@ def _render_column(label_prefix: str, button_word: str):
                          elem_classes=["tts-player", "tts-result"],
                          waveform_options=WAVEFORM)
         status = gr.HTML(elem_classes="tts-status")
-        with gr.Accordion("Prepared text", open=False, elem_classes="tts-pane"):
+        with gr.Accordion("Text as it will be read", open=False, elem_classes="tts-pane"):
             preview = gr.HTML(_idle_html(
                 "No preview yet",
-                " Press Preview for the exact lines the model will be given, and a time estimate.",
+                " Press Preview to see the exact sentences that will be read, and roughly how long it will take.",
                 art=False))
         redo_line, redo_seed, redo_btn, redo_status = _fix_one_line_block()
     return progress, audio, status, preview, redo_line, redo_seed, redo_btn, redo_status
@@ -1328,10 +1556,112 @@ def build_app() -> gr.Blocks:
             sysbar = gr.HTML(_system_html())
 
         with gr.Tabs(elem_classes="tts-tabs") as tabs:
+            # ================= Clone a voice (the front door) =================
+            with gr.Tab("Clone a voice", id="clone"):
+                c_prof = gr.State(None)
+                c_saved = gr.State(None)
+                with gr.Row(equal_height=False, elem_classes="tts-split"):
+                    with gr.Column(scale=3, elem_classes="tts-col"):
+                        with gr.Column(elem_classes=["tts-card", "tts-card--feature"],
+                                       elem_id="tts-clone-card"):
+                            gr.HTML(_title("upload", "Start with a voice",
+                                           "10&ndash;20 seconds of someone talking, as an MP3, WAV, M4A "
+                                           "or FLAC file, or record yourself. Only clone voices you "
+                                           "have permission to use."))
+                            a_audio = gr.Audio(
+                                label="Voice clip", show_label=False,
+                                type="filepath", sources=["upload"],
+                                elem_classes=["tts-player", "tts-drop"], elem_id="tts-drop",
+                                waveform_options=WAVEFORM,
+                            )
+                            with gr.Accordion("Or record yourself", open=False,
+                                              elem_classes=["tts-pane", "tts-recpane"],
+                                              elem_id="tts-recpane"):
+                                gr.HTML('<div class="tts-readme"><small>Read this aloud</small>'
+                                        f"<q>{escape(READ_PASSAGE)}</q></div>")
+                                recorder = gr.HTML(value="", html_template='<div class="tts-rec"></div>',
+                                                   js_on_load=RECORDER_JS, elem_classes="tts-recorder")
+                            a_report = gr.HTML()
+
+                        with gr.Column(elem_classes="tts-card", elem_id="tts-transcript-card"):
+                            gr.HTML(_title("script", "What's said in the clip",
+                                           "Written out for you automatically. The voice learns from these "
+                                           "exact words, so fix anything that's wrong."))
+                            asr_html = gr.HTML(_idle_html(
+                                "Waiting for a clip", " Add one above and the words appear here.", art=False))
+                            a_text = gr.Textbox(
+                                label="Transcript", lines=4, max_lines=12, elem_id="tts-transcript",
+                                placeholder="The words spoken in the clip appear here. You can edit them.",
+                            )
+                            with gr.Accordion("Transcription options", open=False, elem_classes="tts-pane"):
+                                a_verbatim = gr.Checkbox(
+                                    value=True, label="Keep every um and uh",
+                                    info="Recommended. The voice learns best when the text matches the "
+                                         "audio exactly, hesitations included.")
+                                a_quality = gr.Radio(
+                                    ["Accurate", "Fast"], value="Accurate", label="Transcription",
+                                    elem_classes="tts-seg",
+                                    info="Accurate catches accents and names best. Fast is quicker on "
+                                         "a slow computer.")
+                                a_lang = gr.Dropdown(
+                                    list(ASR_LANGUAGE), value="English", label="Language spoken in the clip")
+                                a_redo = gr.Button("Transcribe again", variant="secondary", size="sm")
+
+                        with gr.Column(elem_classes="tts-card", elem_id="tts-save-card"):
+                            gr.HTML(_title("voice", "Name your voice",
+                                           "Saved on this computer. Use it any time from Speak."))
+                            a_name = gr.Textbox(label="Voice name", placeholder="e.g. Auntie Faiza")
+                            with gr.Accordion("Advanced", open=False, elem_classes="tts-pane"):
+                                a_size = gr.Radio(
+                                    ["0.6B", "1.7B"], value="0.6B", label="Model size", elem_classes="tts-seg",
+                                    info="A voice is tied to the size that made it. 1.7B needs ~3.8 GB free RAM.",
+                                )
+                                a_xvec = gr.Checkbox(
+                                    label="Quick mode: skip the transcript (lower quality)",
+                                    value=False,
+                                )
+                            with gr.Row(elem_classes="tts-actions"):
+                                a_btn = gr.Button("Create my voice", variant="primary",
+                                                  elem_classes="tts-go", elem_id="tts-create-btn")
+                            a_status = gr.HTML(elem_classes="tts-status")
+
+                    with gr.Column(scale=2, elem_classes="tts-col"):
+                        with gr.Column(elem_classes="tts-card", elem_id="tts-profile-card"):
+                            gr.HTML(_title("wave", "Your voice at a glance",
+                                           "How this person speaks, read from the clip."))
+                            c_prof_html = gr.HTML(_profile_html(None))
+                        with gr.Column(elem_classes="tts-card", elem_id="tts-try-card"):
+                            gr.HTML(_title("play", "Hear your new voice",
+                                           "Type anything and hear it in the voice you just made."))
+                            c_note = gr.HTML('<div class="tts-note">Create the voice first. '
+                                             "Then type here and press Speak.</div>")
+                            c_script = gr.Textbox(
+                                label="What should it say?", lines=3, max_lines=10,
+                                value=("Howzit! This is my new voice, made right here in Skinnerbek "
+                                       "Studio. Not bad, hey?"))
+                            c_delivery = gr.Radio(["Steady", "Natural", "Expressive"], value="Natural",
+                                                  label="Delivery", elem_classes="tts-seg")
+                            with gr.Row(elem_classes="tts-actions"):
+                                c_btn = gr.Button("Speak", variant="primary", interactive=False,
+                                                  elem_classes="tts-go", elem_id="tts-try-btn")
+                            c_prog = gr.HTML()
+                            c_audio = gr.Audio(label="Your new voice", type="filepath",
+                                               elem_classes=["tts-player", "tts-result"],
+                                               waveform_options=WAVEFORM)
+                            c_status = gr.HTML(elem_classes="tts-status")
+
+                recorder.change(lambda p: p or gr.update(), inputs=[recorder], outputs=[a_audio])
+                a_audio.change(_clip_report_html, inputs=[a_audio], outputs=[a_report]).then(
+                    do_transcribe, inputs=[a_audio, a_verbatim, a_quality, a_lang, a_name],
+                    outputs=[asr_html, a_text, c_prof_html, c_prof, a_name])
+                a_redo.click(do_transcribe, inputs=[a_audio, a_verbatim, a_quality, a_lang, a_name],
+                             outputs=[asr_html, a_text, c_prof_html, c_prof, a_name])
+                c_btn.click(do_clone_try, inputs=[c_saved, c_script, c_delivery],
+                            outputs=[c_audio, c_prog, c_status])
+
             # ================= Speak =================
             with gr.Tab("Speak", id="speak"):
                 speak_state = gr.State(None)
-                gr.HTML(WELCOME_HTML)
                 with gr.Row(equal_height=False, elem_classes="tts-split"):
                     with gr.Column(scale=3, elem_classes="tts-col"):
                         with gr.Column(elem_classes="tts-card"):
@@ -1396,6 +1726,7 @@ def build_app() -> gr.Blocks:
                 script.input(None, inputs=[script], outputs=[counter], js=COUNTER_JS)
                 script.change(None, inputs=[script], outputs=[counter], js=COUNTER_JS)
                 voice.change(_voice_card_html, inputs=[voice], outputs=[voice_card], queue=False)
+                voice.change(_voice_defaults, inputs=[voice], outputs=[delivery, gap_ms], queue=False)
                 speak_btn.click(
                     do_speak,
                     inputs=[voice, script, size, language, instruct, delivery, tidy,
@@ -1409,6 +1740,42 @@ def build_app() -> gr.Blocks:
                                   outputs=[preview_md])
                 redo_btn.click(do_regen_line, inputs=[speak_state, redo_line, redo_seed],
                                outputs=[audio, redo_status, speak_state])
+
+            # ================= My voices =================
+            with gr.Tab("My voices", id="voices") as voices_tab:
+                with gr.Row(equal_height=False, elem_classes="tts-split"):
+                    with gr.Column(scale=3, elem_classes="tts-col"):
+                        with gr.Column(elem_classes="tts-card"):
+                            gr.HTML(_title("grid", "Your voices", "Every voice you've cloned on this computer."))
+                            gallery = gr.HTML(_voices_gallery_html())
+                            with gr.Row(elem_classes="tts-actions"):
+                                new_voice_btn = gr.Button("Create a new voice", variant="secondary")
+                    with gr.Column(scale=2, elem_classes="tts-col"):
+                        with gr.Column(elem_classes="tts-card"):
+                            gr.HTML(_title("play", "Manage a voice", "Hear the clip it was made from, use it, or remove it."))
+                            v_pick = gr.Dropdown(label="Voice", choices=list_voices(),
+                                                 value=(list_voices()[0] if list_voices() else None))
+                            v_card = gr.HTML()
+                            v_audio = gr.Audio(label="Voice clip", type="filepath", interactive=False,
+                                               elem_classes="tts-player", waveform_options=WAVEFORM)
+                            with gr.Row(elem_classes="tts-actions"):
+                                v_use = gr.Button("Use in Speak", variant="primary")
+                                v_del = gr.Button("Delete voice", variant="stop")
+                            v_armed = gr.State(False)
+                            v_status = gr.HTML(elem_classes="tts-status")
+
+                a_btn.click(do_add_voice, inputs=[a_name, a_audio, a_text, a_xvec, a_size, c_prof],
+                            outputs=[a_status, voice, gallery, v_pick, c_saved]).then(
+                    _try_ready, inputs=[c_saved], outputs=[c_note, c_btn, c_delivery])
+                new_voice_btn.click(lambda: gr.Tabs(selected="clone"), outputs=[tabs], queue=False)
+                v_pick.change(do_pick_voice, inputs=[v_pick], outputs=[v_audio, v_card]).then(
+                    lambda: (False, gr.update(value="Delete voice"), ""), outputs=[v_armed, v_del, v_status])
+                v_use.click(lambda n: (gr.update(value=f"voice:{n}") if n else gr.update(),
+                                       gr.Tabs(selected="speak")),
+                            inputs=[v_pick], outputs=[voice, tabs])
+                v_del.click(do_delete_voice, inputs=[v_pick, v_armed],
+                            outputs=[v_status, voice, v_pick, v_del, v_armed]).then(
+                    lambda: _voices_gallery_html(), outputs=[gallery])
 
             # ================= Design a voice =================
             with gr.Tab("Design a voice", id="design"):
@@ -1466,79 +1833,6 @@ def build_app() -> gr.Blocks:
                                     outputs=[d_preview_md])
                 d_redo_btn.click(do_regen_line, inputs=[d_state, d_redo_line, d_redo_seed],
                                  outputs=[d_audio, d_redo_status, d_state])
-
-            # ================= Voice library =================
-            with gr.Tab("Voice library", id="voices") as voices_tab:
-                with gr.Row(equal_height=False, elem_classes="tts-split"):
-                    with gr.Column(scale=3, elem_classes="tts-col"):
-                        with gr.Column(elem_classes="tts-card"):
-                            gr.HTML(_title("mic", "Clone a voice",
-                                           "Record or upload 10&ndash;20 seconds of clear speech. Only use "
-                                           "voices you have the speaker's permission to clone."))
-                            gr.HTML(_sec("Name it", 3, 1))
-                            a_name = gr.Textbox(label="Voice name", placeholder="e.g. auntie_faiza",
-                                                show_label=False)
-                            gr.HTML(_sec("Record or upload a clip", 3, 2))
-                            gr.HTML('<div class="tts-readme"><small>Read this aloud</small>'
-                                    f"<q>{escape(READ_PASSAGE)}</q></div>")
-                            recorder = gr.HTML(value="", html_template='<div class="tts-rec"></div>',
-                                               js_on_load=RECORDER_JS, elem_classes="tts-recorder")
-                            a_audio = gr.Audio(
-                                label="Reference clip (record above, or drop a file here)",
-                                type="filepath", sources=["upload"], elem_classes="tts-player",
-                                waveform_options=WAVEFORM,
-                            )
-                            a_report = gr.HTML()
-                            gr.HTML(_sec("Transcript", 3, 3))
-                            a_text = gr.Textbox(
-                                label="Exactly what is said in the clip", lines=3,
-                                placeholder="Type exactly what is said in the clip, word for word.",
-                            )
-                            use_passage = gr.Button("I read the passage above", size="sm",
-                                                    elem_classes="tts-pill")
-                            gr.HTML(_sec("Save", 3, 4))
-                            with gr.Row():
-                                a_size = gr.Radio(
-                                    ["0.6B", "1.7B"], value="0.6B", label="Model size", elem_classes="tts-seg",
-                                    info="A voice is tied to the size that made it. 1.7B needs ~3.8 GB free RAM.",
-                                )
-                                a_xvec = gr.Checkbox(
-                                    label="Timbre only (skip the transcript: quicker, lower quality)",
-                                    value=False,
-                                )
-                            with gr.Row(elem_classes="tts-actions"):
-                                a_btn = gr.Button("Save this voice", variant="primary", elem_classes="tts-go")
-                            a_status = gr.HTML(elem_classes="tts-status")
-                    with gr.Column(scale=2, elem_classes="tts-col"):
-                        with gr.Column(elem_classes="tts-card"):
-                            gr.HTML(_title("grid", "Your voices", "Everything you've cloned."))
-                            gallery = gr.HTML(_voices_gallery_html())
-                        with gr.Column(elem_classes="tts-card"):
-                            gr.HTML(_title("play", "Manage a voice", "Hear the clip it was made from, use it, or remove it."))
-                            v_pick = gr.Dropdown(label="Voice", choices=list_voices(),
-                                                 value=(list_voices()[0] if list_voices() else None))
-                            v_card = gr.HTML()
-                            v_audio = gr.Audio(label="Reference clip", type="filepath", interactive=False,
-                                               elem_classes="tts-player", waveform_options=WAVEFORM)
-                            with gr.Row(elem_classes="tts-actions"):
-                                v_use = gr.Button("Use in Speak", variant="primary")
-                                v_del = gr.Button("Delete voice", variant="stop")
-                            v_armed = gr.State(False)
-                            v_status = gr.HTML(elem_classes="tts-status")
-
-                recorder.change(lambda p: p or gr.update(), inputs=[recorder], outputs=[a_audio])
-                a_audio.change(_clip_report_html, inputs=[a_audio], outputs=[a_report])
-                use_passage.click(lambda: READ_PASSAGE, outputs=[a_text], queue=False)
-                a_btn.click(do_add_voice, inputs=[a_name, a_audio, a_text, a_xvec, a_size],
-                            outputs=[a_status, voice, gallery, v_pick])
-                v_pick.change(do_pick_voice, inputs=[v_pick], outputs=[v_audio, v_card]).then(
-                    lambda: (False, gr.update(value="Delete voice"), ""), outputs=[v_armed, v_del, v_status])
-                v_use.click(lambda n: (gr.update(value=f"voice:{n}") if n else gr.update(),
-                                       gr.Tabs(selected="speak")),
-                            inputs=[v_pick], outputs=[voice, tabs])
-                v_del.click(do_delete_voice, inputs=[v_pick, v_armed],
-                            outputs=[v_status, voice, v_pick, v_del, v_armed]).then(
-                    lambda: _voices_gallery_html(), outputs=[gallery])
 
             # ================= Recordings =================
             with gr.Tab("Recordings", id="recordings") as rec_tab:
@@ -1782,9 +2076,9 @@ def main() -> int:
 
     build_app().launch(
         # Gradio 6 takes css/theme/js here, not in the Blocks constructor.
-        css=CSS + _hero_css(),
+        css=DRIVER_CSS + CSS + _hero_css(),
         theme=THEME,
-        head=f"<script>{STUDIO_JS}</script>",
+        head=f"<script>{DRIVER_JS}</script><script>{STUDIO_JS}</script>",
         favicon_path=str(ASSETS_DIR / "favicon.svg"),
         server_name=args.host,
         server_port=args.port,

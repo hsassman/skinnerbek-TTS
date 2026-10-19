@@ -12,6 +12,7 @@ dependencies = [
     "numpy==2.4.6",
     "torch==2.13.0",
     "pyloudnorm==0.2.0",   # loudness normalisation to a target LUFS (scripts/common.py)
+    "faster-whisper==1.2.1",  # automatic reference-clip transcripts (scripts/transcribe.py)
 ]
 
 [project.optional-dependencies]
