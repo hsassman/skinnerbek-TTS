@@ -1,17 +1,9 @@
-"""Check and tidy a reference clip before it becomes a voice.
+"""Check reference-clip quality and prepare a persistent copy for cloning.
 
-Cloning quality is set almost entirely by the reference clip, and the failure
-modes are mundane: a muted or privacy-blocked microphone records pure silence,
-a hot mic clips, a long clip slows encoding for no gain. None of that surfaced
-before -- the clip went straight into the model and a bad voice came out the
-other end, minutes later.
+prepare() converts to mono, trims edge silence and levels the peak. analyze()
+reports duration, silence, loudness and clipping before model loading.
 
-`analyze()` reports those problems up front, in words, and `prepare()` writes
-the copy the voice is actually built from: mono, leading/trailing silence
-trimmed, peak-levelled, stored next to the voice. That copy also replaces the
-browser recording's temp path, which Gradio deletes when its cache is cleared.
-
-    python scripts/refclip.py some_clip.wav      # print the report
+    python scripts/refclip.py some_clip.wav
 """
 import sys
 from dataclasses import dataclass, field

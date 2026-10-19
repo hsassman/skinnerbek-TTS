@@ -471,21 +471,9 @@ def run_clone(model, lines: List[str], *, language: str, voice_clone_prompt=None
     )
 
 
-# --- how long a single line is allowed to take --------------------------------
-#
-# qwen_tts's generate() defaults to max_new_tokens=4096 codec frames. The 12Hz
-# checkpoints emit 12 frames per second of speech, so that ceiling is ~5.7
-# MINUTES of audio for one line, and nothing in the library relates it to how
-# much text was actually passed in. When a line fails to emit its EOS code -- odd
-# text like long digit runs makes that markedly more likely -- generation simply
-# runs to the cap. On a CPU box at a few frames per second that is hours of work
-# for one sentence, which is exactly how a short script turns into an overnight
-# job with no output.
-#
-# So budget from the text instead. CHARS_PER_SECOND is deliberately pessimistic
-# (the slowest line measured on this project's 0.6B reads was ~7.4 chars/sec),
-# and TOKEN_HEADROOM leaves ~3x on top, so this only ever bites a generation that
-# has already gone wrong. Pass --max-new-tokens to override it explicitly.
+# Bound generation by text length: the library's 4096-frame default permits
+# about 5.7 minutes of audio per line. These conservative limits leave headroom
+# for slow speech; --max-new-tokens overrides them.
 CODEC_HZ = 12.0
 CHARS_PER_SECOND = 8.0
 TOKEN_HEADROOM = 3.0
@@ -697,31 +685,19 @@ def synth(
     ref_text: Optional[str] = None,
     x_vector_only: bool = False,
 ):
-    """Generate `lines` through one capability, `chunk_size` lines per model call.
+    """Generate lines in chunks; return (waveforms, sample_rate).
 
-    qwen_tts pads and batches every text handed to it in a single call, so a
-    dozen lines build a dozen-wide KV cache and hold every waveform in RAM before
-    decoding -- multiple GB that pages to disk on an 8GB box and never finishes.
-    `chunk_size=1` (the default) generates one line at a time: slower wall-clock
-    where RAM is plentiful, but the peak footprint stays at a single line, and a
-    `gc.collect()` runs between chunks. `chunk_size=0` (or a number >= len(lines))
-    restores the single batched call, which is the faster choice on a big machine.
+    qwen_tts batches every text in one call, which on an 8 GB box builds a KV
+    cache and holds every waveform at once -- multiple GB that pages to disk. So
+    chunk_size=1 (the default) generates one line per call with gc.collect()
+    between chunks, keeping peak RAM at a single line. chunk_size=0, or any value
+    >= len(lines), batches everything (faster on a big machine). Changing the
+    chunk size changes seeded output. Each call gets a text-based token budget
+    unless sampling explicitly sets max_new_tokens.
 
-    A given seed produces different audio at different chunk sizes -- the sampler
-    draws in a different order -- but each take is an equally valid sample.
-
-    Each call is also given a `max_new_tokens` ceiling derived from its longest
-    line (see token_budget) so one line that never emits EOS can't run to the
-    library's 4096-frame default and burn hours. An explicit --max-new-tokens
-    wins.
-
-    `should_cancel()` is polled between chunks; returning True raises Cancelled
-    with whatever finished already written by `on_line`.
-
-    `capability` is 'preset' | 'design' | 'clone'. `on_line(index, wav, sr)` fires
-    per finished line (write each to disk as you go so a killed run still leaves
-    usable audio). `on_progress(done, total)` fires per chunk. Returns
-    (wavs, sample_rate), exactly like the run_* helpers.
+    on_line(index, waveform, sample_rate) runs for each completed line, then
+    on_progress(done, total) runs per chunk. should_cancel is polled between
+    chunks and raises Cancelled; on_line can preserve completed audio on disk.
     """
     total = len(lines)
     # max(1, ...) only matters for an empty `lines`: step would be 0 and
@@ -913,7 +889,14 @@ def stitch(
     arrs = []
     sample_rate = None
     for p in part_paths:
-        a, sample_rate = sf.read(p, dtype="float32")
+        a, rate = sf.read(p, dtype="float32")
+        if sample_rate is not None and rate != sample_rate:
+            raise ValueError("Cannot stitch audio parts with different sample rates")
+        # Parts are mono model output, and the join pads with 1-D silence, so a
+        # multichannel part could never be joined: refuse it up front.
+        if a.ndim != 1:
+            raise ValueError("Cannot stitch multichannel audio parts; parts must be mono")
+        sample_rate = rate
         arrs.append(a)
     if sample_rate is None:
         raise ValueError("stitch() got no parts")

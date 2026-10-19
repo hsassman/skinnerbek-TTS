@@ -420,7 +420,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    return args.func(args)
+    try:
+        return args.func(args)
+    except ValueError as e:
+        # voice_library rejects unusable names; report it like every other CLI error.
+        if "Voice name" in str(e) or "reserved name" in str(e):
+            raise SystemExit(str(e))
+        raise
 
 
 if __name__ == "__main__":

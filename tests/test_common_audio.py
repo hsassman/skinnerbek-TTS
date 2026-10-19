@@ -168,3 +168,30 @@ def test_cpu_bf16_probe_never_raises():
     import common
 
     assert isinstance(common.cpu_bf16_is_native(), bool)
+
+
+@pytest.mark.parametrize('rate, channels', [(16000, 1), (24000, 2)])
+def test_stitch_rejects_incompatible_parts(tmp_path, rate, channels):
+    import soundfile as sf
+
+    first = tmp_path / 'first.wav'
+    second = tmp_path / 'second.wav'
+    sf.write(first, np.zeros(2400), 24000)
+    shape = (2400,) if channels == 1 else (2400, channels)
+    sf.write(second, np.zeros(shape), rate)
+    out = tmp_path / 'joined.wav'
+    with pytest.raises(ValueError, match='Cannot stitch'):
+        stitch([str(first), str(second)], str(out))
+    assert not out.exists()
+
+
+def test_stitch_rejects_all_stereo_parts(tmp_path):
+    import soundfile as sf
+
+    parts = []
+    for i in range(2):
+        p = tmp_path / f'part{i}.wav'
+        sf.write(p, np.zeros((2400, 2)), 24000)
+        parts.append(str(p))
+    with pytest.raises(ValueError, match='multichannel'):
+        stitch(parts, str(tmp_path / 'joined.wav'))

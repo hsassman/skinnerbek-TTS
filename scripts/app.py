@@ -73,7 +73,8 @@ from textprep import LEXICON_PATH  # noqa: E402
 import refclip  # noqa: E402
 import transcribe as asr  # noqa: E402
 from voice_library import (  # noqa: E402
-    delete_voice, list_voices, load_voice, ref_clip_path, save_voice, voice_meta, voice_path,
+    delete_voice, is_valid_name, list_voices, load_voice, ref_clip_path, save_voice, voice_meta,
+    voice_path,
 )
 
 # ---------------------------------------------------------------------------
@@ -967,6 +968,9 @@ def do_add_voice(name, ref_audio, ref_text, xvec_only, size, prof=None,
             return (_bad("Give the voice a name."), *keep)
         if not name.replace("_", "").replace("-", "").isalnum():
             return (_bad("Use only letters and numbers in the name, for example auntie_faiza."), *keep)
+        if not is_valid_name(name):
+            return (_bad(f"<strong>{escape(name)}</strong> can't be used as a name on Windows. "
+                         "Pick another."), *keep)
         if not ref_audio:
             return (_bad("Record or upload a reference clip first."), *keep)
         if not xvec_only and not (ref_text or "").strip():

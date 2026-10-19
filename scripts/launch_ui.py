@@ -20,7 +20,7 @@ common.resolve_dtype: the 1.7B models need bfloat16 on this 8GB box). One
 checkpoint per process.
 
 Generation is slow on CPU -- expect tens of seconds to minutes per line. Voices
-are saved in the same .pt format either UI and `tts.py voices` all use, so a
+use the same .pt format in both UIs and `tts.py voices`, so a
 voice made in one place works everywhere; save into voices/ to share it.
 """
 import argparse
@@ -65,7 +65,8 @@ def main() -> int:
 
     if args.mode is None:
         # No capability picked -> the simple all-in-one app. Forward the flags it shares.
-        app_argv = ["app.py", "--host", args.ip, "--port", str(args.port), "--device", args.device]
+        app_argv = ["app.py", "--host", args.ip, "--port", str(args.port), "--device", args.device,
+                    "--dtype", args.dtype]
         if args.share:
             app_argv.append("--share")
         if args.offline:

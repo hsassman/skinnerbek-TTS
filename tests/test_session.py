@@ -4,6 +4,7 @@ import json
 import time
 
 import numpy as np
+import pytest
 import soundfile as sf
 
 from session import SESSION_SUFFIX, cleanup_orphans, list_sessions, load_session, save_session
@@ -101,3 +102,49 @@ def test_cleanup_dry_run_deletes_nothing(tmp_path):
 
 def test_cleanup_on_a_missing_directory_is_a_noop(tmp_path):
     assert cleanup_orphans(tmp_path / "does-not-exist") == []
+
+@pytest.mark.parametrize('change', [
+    {'kind': 'unknown'}, {'params': None}, {'sr': 0}, {'sr': '24000'},
+    {'lines': 'line'}, {'parts': [None]}, {'gaps': [-1]},
+    {'gaps': [float('nan')]}, {'gaps': []}, {'prefix': []},
+])
+def test_malformed_sessions_are_ignored(tmp_path, change):
+    state = _state(tmp_path, n=1)
+    state.update(change)
+    path = tmp_path / f'bad{SESSION_SUFFIX}'
+    path.write_text(json.dumps({'version': 1, **state}), encoding='utf-8')
+    assert load_session(str(path)) is None
+    assert list_sessions(tmp_path) == []
+
+
+def test_saves_in_same_second_do_not_overwrite(tmp_path):
+    state = _state(tmp_path)
+    first = save_session(state, 'first.wav', tmp_path)
+    second = save_session(state, 'second.wav', tmp_path)
+    assert first != second
+    assert len(list_sessions(tmp_path)) == 2
+
+
+def test_zero_limit_returns_no_sessions(tmp_path):
+    save_session(_state(tmp_path), 'joined.wav', tmp_path)
+    assert list_sessions(tmp_path, limit=0) == []
+
+
+def test_saved_clone_session_roundtrip(tmp_path):
+    state = _state(tmp_path)
+    state['kind'] = 'voice'
+    path = save_session(state, 'joined.wav', tmp_path)
+    assert load_session(str(path))['kind'] == 'voice'
+
+
+def test_cleanup_keeps_parts_of_a_session_too_odd_to_restore(tmp_path):
+    import os
+
+    state = _state(tmp_path, n=2)
+    state["sr"] = 24000.0                     # fails the restore schema, still names its parts
+    (tmp_path / f"odd{SESSION_SUFFIX}").write_text(json.dumps({"version": 1, **state}), encoding="utf-8")
+    old = time.time() - 48 * 3600
+    for p in state["parts"]:
+        os.utime(p, (old, old))
+    assert load_session(str(tmp_path / f"odd{SESSION_SUFFIX}")) is None
+    assert cleanup_orphans(tmp_path, max_age_hours=24.0) == []

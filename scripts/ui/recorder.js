@@ -1,17 +1,8 @@
 // Reference-clip recorder. Runs as a gr.HTML `js_on_load`, so `element`,
 // `props`, `trigger` and `upload` are provided by Gradio.
 //
-// Why this exists instead of gr.Audio(sources=["microphone"]): Gradio's
-// recorder calls getUserMedia and, when that fails or the permission prompt is
-// dismissed, swallows the error -- the Record button simply does nothing. Its
-// device list is also read once, before permission, so it shows "No microphone
-// found" forever. This recorder asks explicitly, explains every failure with a
-// fix, and encodes a clean 24 kHz mono 16-bit WAV in the browser (the model's
-// own rate) so no server-side conversion or ffmpeg is needed.
-//
-// The template never interpolates ${value}, so setting props.value does not
-// re-render (and wipe) this live DOM; it only carries the uploaded path back to
-// Python via trigger('change').
+// Reports microphone errors and encodes mono 24 kHz WAV locally.
+// props.value carries the upload path without replacing the recorder DOM.
 (() => {
   const TARGET_SR = 24000, MIN_S = 5, GOOD_S = 30, MAX_S = 45;
   const host = element.querySelector('.tts-rec') || element;
@@ -49,7 +40,10 @@
   const canvas = $('wave'), ctx2d = canvas.getContext('2d');
   let state = 'idle', stream = null, ac = null, src = null, proc = null, analyser = null;
   let chunks = [], inRate = 48000, started = 0, raf = 0, timer = 0, blob = null, peaks = [];
-  let deviceId = '';
+  let deviceId = '', previewUrl = null;
+  const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
 
   const setState = (s) => { state = s; host.dataset.state = s;
     btn.setAttribute('aria-label', s === 'recording' ? 'Stop recording' : 'Start recording'); };
@@ -74,7 +68,7 @@
     try {
       const devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput' && d.deviceId);
       const sel = $('device');
-      sel.innerHTML = devs.map((d, i) => `<option value="${d.deviceId}">${(d.label || `Microphone ${i + 1}`).replace(/</g, '&lt;')}</option>`).join('');
+      sel.innerHTML = devs.map((d, i) => `<option value="${escapeHtml(d.deviceId)}">${escapeHtml(d.label || `Microphone ${i + 1}`)}</option>`).join('');
       if (deviceId) sel.value = deviceId;
       $('devrow').hidden = devs.length < 2 && !!devs.length;
       if (!devs.length) $('devrow').hidden = true;
@@ -103,7 +97,7 @@
       say(n === 'NotAllowedError' || n === 'SecurityError' ? FIXES.denied
         : n === 'NotFoundError' ? FIXES.notfound
         : n === 'NotReadableError' || n === 'AbortError' ? FIXES.busy
-        : `<strong>Could not open the microphone.</strong> ${n || 'Error'}: ${(e && e.message) || ''}`, 'err');
+        : `<strong>Could not open the microphone.</strong> ${escapeHtml(n || 'Error')}: ${escapeHtml((e && e.message) || '')}`, 'err');
       return null;
     } finally {
       $('title').textContent = 'Record in the browser';
@@ -161,9 +155,14 @@
   }
 
   async function start() {
-    blob = null; peaks = []; chunks = [];
+    if (state === 'requesting' || state === 'recording' || state === 'counting') return;
+    const had = state;
+    setState('requesting');
     stream = await openMic();
-    if (!stream) { setState('idle'); return; }
+    // A refused or busy mic must not cost the take already recorded.
+    if (!stream) { setState(had === 'review' && blob ? 'review' : 'idle'); return; }
+    if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; }
+    blob = null; peaks = []; chunks = [];
     await listDevices();
     const track = stream.getAudioTracks()[0];
     if (track && track.getSettings) deviceId = track.getSettings().deviceId || deviceId;
@@ -172,34 +171,42 @@
     $('sub').textContent = 'Recording starts after the count.';
     if (!(await countIn())) return;
 
-    ac = new (window.AudioContext || window.webkitAudioContext)();
-    inRate = ac.sampleRate;
-    src = ac.createMediaStreamSource(stream);
-    analyser = ac.createAnalyser(); analyser.fftSize = 1024;
-    proc = ac.createScriptProcessor(4096, 1, 1);
-    proc.onaudioprocess = (e) => { if (state === 'recording') chunks.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
-    src.connect(analyser); src.connect(proc);
-    const mute = ac.createGain(); mute.gain.value = 0; proc.connect(mute); mute.connect(ac.destination);
+    try {
+      ac = new (window.AudioContext || window.webkitAudioContext)();
+      await ac.resume();
+      if (state !== 'counting' || !ac) return;   // stopped while the context resumed
+      inRate = ac.sampleRate;
+      src = ac.createMediaStreamSource(stream);
+      analyser = ac.createAnalyser(); analyser.fftSize = 1024;
+      proc = ac.createScriptProcessor(4096, 1, 1);
+      proc.onaudioprocess = (e) => { if (state === 'recording') chunks.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
+      src.connect(analyser); src.connect(proc);
+      const mute = ac.createGain(); mute.gain.value = 0; proc.connect(mute); mute.connect(ac.destination);
 
-    setState('recording');
-    $('title').textContent = 'Recording';
-    $('sub').textContent = 'Speak naturally. Press stop when you are done.';
-    say('Recording. Press the stop button when you are done.', 'ok');
-    started = performance.now();
-    drawLive();
-    timer = setInterval(() => {
-      const s = (performance.now() - started) / 1000;
-      $('time').textContent = fmt(s);
-      $('fill').style.width = `${Math.min(100, (s / MAX_S) * 100)}%`;
-      if (s >= MAX_S) { stop(); say(`Recording stopped at the ${MAX_S}-second limit. Listen back below.`, 'warn'); }
-    }, 200);
+      setState('recording');
+      $('title').textContent = 'Recording';
+      $('sub').textContent = 'Speak naturally. Press stop when you are done.';
+      say('Recording. Press the stop button when you are done.', 'ok');
+      started = performance.now();
+      drawLive();
+      timer = setInterval(() => {
+        const s = (performance.now() - started) / 1000;
+        $('time').textContent = fmt(s);
+        $('fill').style.width = `${Math.min(100, (s / MAX_S) * 100)}%`;
+        if (s >= MAX_S) { stop(); say(`Recording stopped at the ${MAX_S}-second limit. Listen back below.`, 'warn'); }
+      }, 200);
+    } catch (err) {
+      if (state !== 'counting' && state !== 'recording') return;   // already cancelled
+      release(); setState('idle');
+      say(`<strong>Could not start recording.</strong> ${escapeHtml((err && err.message) || err)}`, 'err');
+    }
   }
 
   function release() {
     cancelAnimationFrame(raf); clearInterval(timer);
     try { proc && proc.disconnect(); src && src.disconnect(); } catch (_) {}
     if (stream) stream.getTracks().forEach((t) => t.stop());   // turns the browser's mic indicator off
-    if (ac) ac.close();
+    if (ac) ac.close().catch(() => {});
     stream = ac = src = proc = analyser = null;
   }
 
@@ -236,7 +243,8 @@
     const pcm = resample(all, inRate, TARGET_SR);
     blob = wav(pcm, TARGET_SR);
     drawStatic(pcm);
-    $('player').src = URL.createObjectURL(blob);
+    previewUrl = URL.createObjectURL(blob);
+    $('player').src = previewUrl;
     $('level').hidden = true;
     setState('review');
     $('title').textContent = `Take ready · ${fmt(secs)}`;
@@ -265,9 +273,9 @@
       const res = await upload(file);
       props.value = res.path;
       trigger('change');
-      say('<strong>Take added.</strong> It is now the clip below &mdash; check the quality report, add the transcript and save.', 'ok');
+      say('<strong>Take added.</strong> It is now the clip below &mdash; check the quality report and transcript, then save.', 'ok');
     } catch (err) {
-      say(`<strong>Could not send the take to the app.</strong> ${(err && err.message) || err}`, 'err');
+      say(`<strong>Could not send the take to the app.</strong> ${escapeHtml((err && err.message) || err)}`, 'err');
     } finally { b.removeAttribute('aria-disabled'); b.textContent = 'Use this take'; }
   });
 

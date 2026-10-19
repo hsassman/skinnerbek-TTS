@@ -21,13 +21,40 @@ import torch
 from common import VOICES_DIR
 
 
+_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+             *(f"LPT{i}" for i in range(1, 10))}
+
+
+def is_valid_name(name: str) -> bool:
+    try:
+        _validate_name(name)
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_name(name: str) -> None:
+    """Keep library operations within the voice directory on every platform."""
+    if not isinstance(name, str) or not name.strip() or name in (".", ".."):
+        raise ValueError("Voice name must be a nonempty filename")
+    if any(c in name for c in '<>:"/\\|?*') or any(ord(c) < 32 for c in name):
+        raise ValueError("Voice name contains invalid filename characters")
+    if name.endswith((".", " ")):
+        raise ValueError("Voice name cannot end with a dot or space")
+    # Windows maps these to devices in any folder: "nul.pt" would swallow the save.
+    if name.split(".")[0].upper() in _RESERVED:
+        raise ValueError(f"'{name}' is a reserved name on Windows; pick another")
+
+
 def voice_path(name: str, voices_dir: Path = VOICES_DIR) -> Path:
+    _validate_name(name)
     return Path(voices_dir) / f"{name}.pt"
 
 
 def ref_clip_path(name: str, voices_dir: Path = VOICES_DIR) -> Path:
     """The cleaned reference clip a voice was built from (see refclip.prepare).
     Kept beside the .pt so the voice can be auditioned and re-encoded later."""
+    _validate_name(name)
     return Path(voices_dir) / f"{name}.ref.wav"
 
 
@@ -81,7 +108,8 @@ def list_voices(voices_dir: Path = VOICES_DIR) -> List[str]:
     voices_dir = Path(voices_dir)
     if not voices_dir.exists():
         return []
-    return sorted(p.stem for p in voices_dir.glob("*.pt"))
+    # A stray file whose name the library can't address shouldn't break listing.
+    return sorted(p.stem for p in voices_dir.glob("*.pt") if is_valid_name(p.stem))
 
 
 def save_voice(

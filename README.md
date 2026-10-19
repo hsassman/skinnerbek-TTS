@@ -4,8 +4,7 @@
 
 Skinnerbek TTS is a local text-to-speech toolkit for **South African English with a Cape Flats /
 Coloured Capetonian accent**, built on Alibaba's open-weight
-[Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) models. No mainstream TTS model ships this
-accent, and Qwen3-TTS has no South African voice either. So the project gets the accent from
+[Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) models. Qwen3-TTS has no built-in South African voice, so this project gets the accent from
 **voice cloning**: a short reference recording of a real speaker conditions the model. Around
 that sits the engineering that makes a small model read well on ordinary hardware: text
 preparation, a reusable voice library, per-line generation with repair, and loudness mastering.
@@ -648,6 +647,8 @@ Serves on `http://127.0.0.1:8000` (local only; `--share` for a public link). Add
 startup stalls on Hugging Face — see Gotchas above.
 
 ## Testing
+
+Run these commands from the repository root:
 
 ```powershell
 python -m pytest                    # unit tests (tests/), no model needed

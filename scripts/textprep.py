@@ -523,7 +523,7 @@ def prepare_script(
     """Turn a block of writing into (lines_to_speak, gap_before_each_line_ms).
 
     `gaps[0]` is always 0. When `normalize` is False the text is still split into
-    lines/sentences but not rewritten -- use it if the cleanup mangles something;
+    explicit lines but not rewritten -- use it if the cleanup mangles something;
     `lexicon.txt` pronunciation overrides are still applied unless `lexicon=False`.
     Raises ValueError if there is nothing to say.
     """

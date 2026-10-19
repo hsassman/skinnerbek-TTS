@@ -1,21 +1,10 @@
-"""Persist the last take so a read can be repaired after a restart.
-
-The "Fix one line" panel needs the line list, the per-line gaps and the paths of
-the raw per-line wavs. That lived only in a `gr.State`, so closing the browser
-tab -- or restarting the server, which this project does often -- threw away the
-ability to repair a read whose audio was still sitting on disk.
-
-A session is a small JSON file written next to the parts it describes. It holds
-no audio: just the text, the gaps and the filenames, so it stays tiny and is
-safe to delete at any time.
-
-`cleanup_orphans()` is the other half: a killed run leaves per-line wavs behind
-with nothing referencing them, and those accumulate forever otherwise.
-"""
+"""Persist repairable takes and remove old, unreferenced audio parts."""
 from __future__ import annotations
 
 import json
+import math
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -37,7 +26,7 @@ def save_session(state: Dict[str, Any], joined: str, parts_dir: Path) -> Optiona
     try:
         d = sessions_dir(Path(parts_dir))
         stamp = time.strftime("%Y%m%d_%H%M%S")
-        path = d / f"{state.get('prefix', 'take')}_{stamp}{SESSION_SUFFIX}"
+        path = d / f"{state.get('prefix', 'take')}_{stamp}_{uuid.uuid4().hex[:8]}{SESSION_SUFFIX}"
         payload = {
             "version": SESSION_VERSION,
             "created": time.time(),
@@ -55,6 +44,8 @@ def save_session(state: Dict[str, Any], joined: str, parts_dir: Path) -> Optiona
 def list_sessions(parts_dir: Path, limit: int = 20) -> List[Dict[str, Any]]:
     """Newest-first sessions whose parts all still exist on disk."""
     out: List[Dict[str, Any]] = []
+    if limit <= 0:
+        return out
     try:
         files = sorted(Path(parts_dir).glob(f"*{SESSION_SUFFIX}"),
                        key=lambda p: p.stat().st_mtime, reverse=True)
@@ -65,7 +56,7 @@ def list_sessions(parts_dir: Path, limit: int = 20) -> List[Dict[str, Any]]:
         if not data:
             continue
         parts = data.get("parts") or []
-        if not parts or not all(Path(p).exists() for p in parts):
+        if not parts or not all(Path(p).is_file() for p in parts):
             continue          # a half-deleted take is not repairable; skip it
         data["_path"] = str(f)
         out.append(data)
@@ -81,7 +72,24 @@ def _read(path: Path) -> Optional[Dict[str, Any]]:
         return None
     if not isinstance(data, dict) or data.get("version") != SESSION_VERSION:
         return None
-    if not data.get("lines") or not data.get("parts"):
+    lines, parts, gaps = (data.get(k) for k in ("lines", "parts", "gaps"))
+    if not all(isinstance(v, list) and v for v in (lines, parts, gaps)):
+        return None
+    if len(lines) != len(parts) or len(gaps) != len(lines):
+        return None
+    if not all(isinstance(v, str) and v.strip() for v in lines + parts):
+        return None
+    if any("\0" in p for p in parts):
+        return None
+    if not all(type(g) in (int, float) and math.isfinite(g) and g >= 0 for g in gaps):
+        return None
+    if data.get("kind") not in ("preset", "design", "voice"):
+        return None
+    if not isinstance(data.get("params"), dict):
+        return None
+    if type(data.get("sr")) is not int or data["sr"] <= 0:
+        return None
+    if "prefix" in data and not isinstance(data["prefix"], str):
         return None
     return data
 
@@ -91,9 +99,7 @@ def load_session(path: str) -> Optional[Dict[str, Any]]:
     data = _read(Path(path))
     if not data:
         return None
-    if len(data["lines"]) != len(data["parts"]):
-        return None           # written by an older/partial run
-    if not all(Path(p).exists() for p in data["parts"]):
+    if not all(Path(p).is_file() for p in data["parts"]):
         return None
     return {
         "kind": data["kind"],
@@ -117,11 +123,18 @@ def cleanup_orphans(parts_dir: Path, max_age_hours: float = 24.0,
     d = Path(parts_dir)
     if not d.is_dir():
         return []
+    # Any session that names a part protects it, even one too malformed to
+    # restore: cleanup must never be stricter than "something points at this".
     referenced = set()
     for f in d.glob(f"*{SESSION_SUFFIX}"):
-        data = _read(f)
-        for p in (data or {}).get("parts", []) or []:
-            referenced.add(str(Path(p).resolve()))
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        parts = data.get("parts") if isinstance(data, dict) else None
+        for p in parts if isinstance(parts, list) else []:
+            if isinstance(p, str) and p and "\0" not in p:
+                referenced.add(str(Path(p).resolve()))
 
     cutoff = time.time() - max_age_hours * 3600
     removed: List[Path] = []

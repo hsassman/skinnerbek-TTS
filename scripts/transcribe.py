@@ -1,20 +1,8 @@
-"""Local speech-to-text for reference clips, plus a read of the speaker's delivery.
+"""Local reference-clip transcription, passage matching and delivery profiles.
 
-Cloning needs the exact words of the reference clip: the Base model learns the
-voice by lining the audio up against its transcript, so a wrong word teaches it
-a wrong sound. Typing that by hand is the step people get wrong or skip. This
-module writes the first draft for them, on this machine, and flags the words it
-is unsure of so the person knows where to look.
-
-    transcribe(path)      -> Transcript   (faster-whisper, word timestamps + confidence)
-    profile(path, t)      -> VoiceProfile (pitch, pace, pauses, expressiveness, fillers)
-    match_passage(t, ref) -> similarity   (snap to the read-aloud passage when it was read)
-
-Tuned for this app's users rather than generic dictation:
-  * verbatim by default -- "um" and "uh" are kept, because the model hears them;
-  * South African vocabulary and the pronunciation lexicon go in as hotwords, so
-    "lekker", "Bo-Kaap" or a client's brand name are spelt the way the user spells them;
-  * the model is loaded on first use and dropped again when a voice model needs the RAM.
+Whisper loads lazily and runs under a lock. Prompts preserve disfluencies;
+South African vocabulary and lexicon hotwords guide spelling. Uncertain words
+are exposed for review. unload() frees the recogniser before TTS model loads.
 """
 from __future__ import annotations
 
