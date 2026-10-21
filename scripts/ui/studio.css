@@ -988,7 +988,7 @@ body:not(.dark) .tts-head :focus-visible { outline-color: var(--tts-accent) !imp
   border-color: var(--tts-accent) !important; background: var(--tts-accent-weak) !important;
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--tts-accent) 14%, transparent) !important; outline: none !important;
 }
-.gradio-container .tts-drop button.center .wrap { height: auto !important; flex: none !important; font-size: 0 !important; color: var(--tts-text) !important; gap: var(--tts-s2) !important; display: flex; flex-direction: column; align-items: center; }
+.gradio-container .tts-drop button.center .wrap { height: auto !important; min-height: 0 !important; max-height: none !important; flex: none !important; font-size: 0 !important; color: var(--tts-text) !important; gap: var(--tts-s2) !important; display: flex; flex-direction: column; align-items: center; }
 .gradio-container .tts-drop button.center .or { display: none !important; }
 .gradio-container .tts-drop button.center .icon-wrap {
   display: grid; place-items: center; width: 56px !important; height: 56px !important; margin-bottom: var(--tts-s2);
