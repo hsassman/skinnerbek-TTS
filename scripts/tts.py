@@ -52,7 +52,9 @@ from common import (
     warn_if_instruct_ignored,
     write_wavs,
 )
-from voice_library import delete_voice, list_voices, load_voice, save_voice, voice_meta, voice_path
+from voice_library import (
+    InvalidVoiceName, delete_voice, list_voices, load_voice, save_voice, voice_meta, voice_path,
+)
 
 
 def add_text_args(parser: argparse.ArgumentParser, default_out: str) -> None:
@@ -422,11 +424,9 @@ def main() -> int:
     args = build_parser().parse_args()
     try:
         return args.func(args)
-    except ValueError as e:
-        # voice_library rejects unusable names; report it like every other CLI error.
-        if "Voice name" in str(e) or "reserved name" in str(e):
-            raise SystemExit(str(e))
-        raise
+    except InvalidVoiceName as e:
+        # Report an unusable name like every other CLI error, not as a traceback.
+        raise SystemExit(str(e))
 
 
 if __name__ == "__main__":

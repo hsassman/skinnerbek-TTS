@@ -148,3 +148,37 @@ def test_cleanup_keeps_parts_of_a_session_too_odd_to_restore(tmp_path):
         os.utime(p, (old, old))
     assert load_session(str(tmp_path / f"odd{SESSION_SUFFIX}")) is None
     assert cleanup_orphans(tmp_path, max_age_hours=24.0) == []
+
+
+@pytest.mark.parametrize("prefix", ["../escape", "a/b", "..", "", "x\\y"])
+def test_session_with_an_unsafe_prefix_is_not_restored(tmp_path, prefix):
+    state = _state(tmp_path, n=1)
+    state["prefix"] = prefix
+    path = tmp_path / f"bad{SESSION_SUFFIX}"
+    path.write_text(json.dumps({"version": 1, **state}), encoding="utf-8")
+    assert load_session(str(path)) is None
+
+
+def test_cleanup_keeps_the_latest_takes_and_retires_older_ones(tmp_path, monkeypatch):
+    import os
+
+    import session
+
+    monkeypatch.setattr(session, "KEEP_SESSIONS", 2)
+    old = time.time() - 48 * 3600
+    paths = []
+    for i in range(3):
+        state = _state(tmp_path, n=1)
+        part = tmp_path / f"take{i}_001.wav"
+        os.replace(state["parts"][0], part)
+        state["parts"] = [str(part)]
+        state["prefix"] = f"take{i}"
+        sess = save_session(state, str(tmp_path / "j.wav"), tmp_path)
+        stamp = old + i                          # oldest first
+        os.utime(part, (stamp, stamp))
+        os.utime(sess, (stamp, stamp))
+        paths.append((sess, part))
+    removed = {p.name for p in cleanup_orphans(tmp_path, max_age_hours=24.0)}
+    (old_sess, old_part), *newer = paths
+    assert removed == {old_sess.name, old_part.name}
+    assert all(s.exists() and p.exists() for s, p in newer)

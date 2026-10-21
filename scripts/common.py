@@ -331,6 +331,9 @@ def model_id(kind: str, size: str) -> str:
     return f"Qwen/Qwen3-TTS-12Hz-{size}-{kind}"
 
 
+_KIND_WORDS = {"Base": "voice-cloning", "CustomVoice": "built-in voices", "VoiceDesign": "voice design"}
+
+
 def load_model(kind: str, args: argparse.Namespace):
     """Load a Qwen3TTSModel, printing what's happening since CPU loads are slow."""
     requested = getattr(args, "dtype", "auto")
@@ -359,6 +362,17 @@ def load_model(kind: str, args: argparse.Namespace):
     from qwen_tts import Qwen3TTSModel
 
     repo = model_id(kind, args.model_size)
+    if getattr(args, "offline", False):
+        # Offline, a missing checkpoint surfaces as transformers' "couldn't connect to
+        # huggingface.co", which tells nobody what to do. Say which model and how.
+        from huggingface_hub import try_to_load_from_cache
+
+        if not isinstance(try_to_load_from_cache(repo, "config.json"), str):
+            gb = "2.5" if args.model_size == "0.6B" else "4.5"
+            raise SystemExit(
+                f"The {args.model_size} {_KIND_WORDS.get(kind, kind)} model ({repo}) isn't downloaded "
+                f"on this computer yet, and offline mode is on. Start once without --offline to "
+                f"download it (about {gb} GB); after that offline works.")
     threads = configure_threads(getattr(args, "threads", None))
     print(
         f"Loading {repo} on {args.device} as {str(dtype).split('.')[-1]} "

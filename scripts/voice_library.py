@@ -10,6 +10,8 @@ The on-disk format matches the one used by qwen_tts's own Gradio demo
 the UI and vice versa.
 """
 import json
+import os
+import re
 import sys
 import time
 from dataclasses import asdict
@@ -21,14 +23,22 @@ import torch
 from common import VOICES_DIR
 
 
-_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
-             *(f"LPT{i}" for i in range(1, 10))}
+_WINDOWS = os.name == "nt"
+
+
+class InvalidVoiceName(ValueError):
+    """A name the library can't safely turn into a file name."""
+
+
+# Windows device names, reserved in every folder and with any extension
+# ("nul.pt", "com¹.pt", "nul .x"). Saving to one silently writes to the device.
+_RESERVED = re.compile(r"^(con|prn|aux|nul|conin\$|conout\$|(com|lpt)[0-9¹²³])$", re.I)
 
 
 def is_valid_name(name: str) -> bool:
     try:
         _validate_name(name)
-    except ValueError:
+    except InvalidVoiceName:
         return False
     return True
 
@@ -36,14 +46,15 @@ def is_valid_name(name: str) -> bool:
 def _validate_name(name: str) -> None:
     """Keep library operations within the voice directory on every platform."""
     if not isinstance(name, str) or not name.strip() or name in (".", ".."):
-        raise ValueError("Voice name must be a nonempty filename")
+        raise InvalidVoiceName("Voice name must be a nonempty filename")
     if any(c in name for c in '<>:"/\\|?*') or any(ord(c) < 32 for c in name):
-        raise ValueError("Voice name contains invalid filename characters")
+        raise InvalidVoiceName("Voice name contains invalid filename characters")
     if name.endswith((".", " ")):
-        raise ValueError("Voice name cannot end with a dot or space")
-    # Windows maps these to devices in any folder: "nul.pt" would swallow the save.
-    if name.split(".")[0].upper() in _RESERVED:
-        raise ValueError(f"'{name}' is a reserved name on Windows; pick another")
+        raise InvalidVoiceName("Voice name cannot end with a dot or space")
+    # Only Windows maps these to devices, so a voice called "aux" made on
+    # Linux stays listable, loadable and removable there.
+    if _WINDOWS and _RESERVED.match(name.split(".")[0].rstrip(" ")):
+        raise InvalidVoiceName(f"'{name}' is a reserved name on Windows; pick another")
 
 
 def voice_path(name: str, voices_dir: Path = VOICES_DIR) -> Path:
@@ -161,7 +172,8 @@ def load_voice(
     payload = torch.load(path, map_location="cpu", weights_only=True)
 
     if expect_model_size:
-        saved_size = (voice_meta(name, voices_dir) or {}).get("model_size")
+        # Read meta from the payload already in memory, not a second torch.load.
+        saved_size = (_meta_from(payload) or {}).get("model_size")
         if saved_size and saved_size != expect_model_size:
             print(
                 f"WARNING: voice '{name}' was registered with the {saved_size} Base model but "
@@ -181,7 +193,10 @@ def voice_meta(name: str, voices_dir: Path = VOICES_DIR) -> Optional[dict]:
     path = voice_path(name, voices_dir)
     if not path.exists():
         return None
-    payload = torch.load(path, map_location="cpu", weights_only=True)
+    return _meta_from(torch.load(path, map_location="cpu", weights_only=True))
+
+
+def _meta_from(payload) -> Optional[dict]:
     raw = payload.get("meta") if isinstance(payload, dict) else None
     if not raw:
         return None

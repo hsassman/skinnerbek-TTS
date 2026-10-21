@@ -530,11 +530,19 @@ def prepare_script(
     if normalize:
         segments = segment_text(text, max_words=max_words, lexicon=lexicon)
     else:
-        # honour explicit line breaks only, like the old behaviour -- but still
-        # run the pronunciation lexicon, which is the point of maintaining it.
-        raw = [ln.strip() for ln in (text or "").splitlines()]
-        raw = [ln for ln in raw if ln and not ln.startswith("#")]
-        segments = [((apply_lexicon(ln) if lexicon else ln), False) for ln in raw]
+        # Honour explicit line breaks only, but still run the pronunciation
+        # lexicon, and keep blank-line paragraph breaks so their pause applies.
+        segments = []
+        blank_before = False
+        for ln in (text or "").splitlines():
+            ln = ln.strip()
+            if not ln:
+                blank_before = True
+                continue
+            if ln.startswith("#"):
+                continue
+            segments.append(((apply_lexicon(ln) if lexicon else ln), blank_before and bool(segments)))
+            blank_before = False
 
     if not segments:
         raise ValueError(

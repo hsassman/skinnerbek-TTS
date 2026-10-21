@@ -184,3 +184,10 @@ def test_scales_reach_trillion():
 
     assert _int_to_words(10 ** 12) == "one trillion"
     assert _int_to_words(10 ** 9) == "one billion"
+
+
+def test_paragraph_pause_survives_with_tidy_off():
+    lines, gaps = prepare_script("One.\nTwo.\n\nThree.", normalize=False, lexicon=False,
+                                 sentence_gap_ms=300, paragraph_gap_ms=900)
+    assert lines == ["One.", "Two.", "Three."]
+    assert gaps == [0, 300, 900]

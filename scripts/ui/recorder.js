@@ -40,13 +40,18 @@
   const canvas = $('wave'), ctx2d = canvas.getContext('2d');
   let state = 'idle', stream = null, ac = null, src = null, proc = null, analyser = null;
   let chunks = [], inRate = 48000, started = 0, raf = 0, timer = 0, blob = null, peaks = [];
-  let deviceId = '', previewUrl = null;
+  let deviceId = '', previewUrl = null, takeSecs = 0;
+  // Each start() gets a ticket; an older start() that wakes up after a cancel
+  // and a fresh start sees a newer ticket and stands down.
+  let ticket = 0;
   const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]));
 
+  const LABELS = { recording: 'Stop recording', counting: 'Cancel recording',
+                   requesting: 'Waiting for microphone permission' };
   const setState = (s) => { state = s; host.dataset.state = s;
-    btn.setAttribute('aria-label', s === 'recording' ? 'Stop recording' : 'Start recording'); };
+    btn.setAttribute('aria-label', LABELS[s] || 'Start recording'); };
   const say = (html, tone = '') => { const m = $('msg'); m.innerHTML = html; m.dataset.tone = tone; };
   const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
   setState('idle');
@@ -144,37 +149,60 @@
     for (let x = step / 2; x < w; x += step) { ctx2d.beginPath(); ctx2d.arc(x, h / 2, r, 0, Math.PI * 2); ctx2d.fill(); }
   }
 
-  async function countIn() {
+  async function countIn(mine) {
     const t = $('time');
     for (const n of [3, 2, 1]) {
       t.innerHTML = `<span class="tts-rec__count">${n}</span>`;
       await new Promise((r) => setTimeout(r, 650));
-      if (state !== 'counting') return false;
+      if (state !== 'counting' || mine !== ticket) return false;
     }
     return true;
   }
 
+  function showReview() {
+    setState('review');
+    $('title').textContent = `Take ready · ${fmt(takeSecs)}`;
+    $('sub').textContent = 'Listen back. If it sounds clear, use it; otherwise record again.';
+  }
+
   async function start() {
     if (state === 'requesting' || state === 'recording' || state === 'counting') return;
+    const mine = ++ticket;
     const had = state;
+    // Create the audio context now, inside the click: browsers only let a page
+    // start audio from a user gesture, and the count-in is long after it.
+    try {
+      ac = new (window.AudioContext || window.webkitAudioContext)();
+      ac.resume().catch(() => {});
+    } catch (_) { ac = null; }
     setState('requesting');
     stream = await openMic();
+    if (mine !== ticket) return;
     // A refused or busy mic must not cost the take already recorded.
-    if (!stream) { setState(had === 'review' && blob ? 'review' : 'idle'); return; }
+    if (!stream) {
+      release();
+      if (had === 'review' && blob) showReview(); else setState('idle');
+      return;
+    }
     if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; }
     blob = null; peaks = []; chunks = [];
+    $('player').removeAttribute('src');
+    $('time').textContent = '0:00'; $('fill').style.width = '0'; $('level').hidden = true;
+    drawIdle();
     await listDevices();
     const track = stream.getAudioTracks()[0];
     if (track && track.getSettings) deviceId = track.getSettings().deviceId || deviceId;
     setState('counting');
     $('title').textContent = 'Get ready…';
     $('sub').textContent = 'Recording starts after the count.';
-    if (!(await countIn())) return;
+    if (!(await countIn(mine))) return;
 
     try {
-      ac = new (window.AudioContext || window.webkitAudioContext)();
-      await ac.resume();
-      if (state !== 'counting' || !ac) return;   // stopped while the context resumed
+      if (!ac) throw new Error('This browser has no Web Audio support.');
+      // Never wait forever: a context the browser won't start should say so.
+      await Promise.race([ac.resume(), new Promise((r) => setTimeout(r, 1500))]);
+      if (state !== 'counting' || mine !== ticket || !ac) return;   // stopped meanwhile
+      if (ac.state !== 'running') throw new Error('The browser did not start audio. Press the record button again.');
       inRate = ac.sampleRate;
       src = ac.createMediaStreamSource(stream);
       analyser = ac.createAnalyser(); analyser.fftSize = 1024;
@@ -196,8 +224,8 @@
         if (s >= MAX_S) { stop(); say(`Recording stopped at the ${MAX_S}-second limit. Listen back below.`, 'warn'); }
       }, 200);
     } catch (err) {
-      if (state !== 'counting' && state !== 'recording') return;   // already cancelled
-      release(); setState('idle');
+      if ((state !== 'counting' && state !== 'recording') || mine !== ticket) return;   // already cancelled
+      release(); setState('idle'); $('time').textContent = '0:00'; drawIdle();
       say(`<strong>Could not start recording.</strong> ${escapeHtml((err && err.message) || err)}`, 'err');
     }
   }
@@ -234,7 +262,7 @@
   }
 
   function stop() {
-    if (state === 'counting') { release(); setState('idle'); $('time').textContent = '0:00'; drawIdle(); return; }
+    if (state === 'counting') { ticket++; release(); setState('idle'); $('time').textContent = '0:00'; drawIdle(); return; }
     if (state !== 'recording') return;
     const secs = (performance.now() - started) / 1000;
     release();
@@ -246,9 +274,8 @@
     previewUrl = URL.createObjectURL(blob);
     $('player').src = previewUrl;
     $('level').hidden = true;
-    setState('review');
-    $('title').textContent = `Take ready · ${fmt(secs)}`;
-    $('sub').textContent = 'Listen back. If it sounds clear, use it; otherwise record again.';
+    takeSecs = secs;
+    showReview();
     let peak = 0; for (const x of pcm) { const a = Math.abs(x); if (a > peak) peak = a; }
     if (peak < 0.01) say(`<strong>That take is silent.</strong> The microphone may be muted, or Windows may be blocking it. ${FIXES.denied.replace(/^<strong>.*?<\/strong>/, '')}`, 'err');
     else if (secs < MIN_S) say(`<strong>Short take (${secs.toFixed(1)}s).</strong> 10&ndash;20 seconds clones best.`, 'warn');
@@ -257,10 +284,8 @@
   }
 
   btn.addEventListener('click', () => { (state === 'recording' || state === 'counting') ? stop() : start(); });
-  host.querySelector('[data-act="again"]').addEventListener('click', () => {
-    setState('idle'); say(''); $('time').textContent = '0:00'; $('fill').style.width = '0';
-    drawIdle(); start();
-  });
+  // start() clears the old take only once the microphone is actually open.
+  host.querySelector('[data-act="again"]').addEventListener('click', () => { say(''); start(); });
   host.querySelector('[data-act="use"]').addEventListener('click', async (e) => {
     if (!blob) return;
     // aria-disabled, not disabled: disabling the focused button would drop

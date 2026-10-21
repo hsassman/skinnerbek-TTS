@@ -23,7 +23,7 @@ Fine-tuning a dedicated accent model is the next stage (see [Status and roadmap]
 - **Pronunciation lexicon.** A plain-text `lexicon.txt` of overrides for names, slang and
   acronyms the model gets wrong. The web app reloads it live.
 - **Delivery presets** (steady / natural / expressive) and reproducible seeds.
-- **Loudness mastering** to −16 LUFS, so separate takes match in volume.
+- **Loudness mastering** towards −16 LUFS without clipping, so separate takes match in volume.
 - **Web app (Skinnerbek Studio).** Opens on **Clone a voice**: drop in a clip or record
   yourself, and the app writes out what was said, reads how the person speaks, saves the voice
   and lets you hear it say anything, all on one screen. Speak, My voices, Design a voice,
@@ -152,7 +152,7 @@ scripts/
   ui/                    studio.css, studio.js, recorder.js: the web app's styles and browser code
   ui/vendor/             driver.js 1.8.0 (MIT) for the guided tour, bundled so it works offline
 assets/                  logo, favicon, masthead banners (night and dawn)
-tests/                   pytest suite (99 tests, no model download needed)
+tests/                   pytest suite (144 tests, no model download needed)
 lexicon.txt              pronunciation overrides
 samples/quick_test.txt   short script for smoke-testing an install
 samples/ voices/ output/ local-only: reference clips, voice fingerprints, generated audio (gitignored)
@@ -453,7 +453,10 @@ proper nouns and acronyms the model gets wrong. `--no-lexicon` skips it for one 
 Every take is normalised to **−16 LUFS** (`--lufs`), one gain across all lines so relative
 levels between sentences are preserved, then peak-limited to 0.97 (`--peak`) as a safety net.
 This keeps separate takes and joined paragraphs at a consistent perceived loudness rather than
-just "not clipping". `--lufs 0` falls back to peak-limiting only. Needs `pyloudnorm`
+just "not clipping". The peak limit wins over the target: a voice whose peaks are already near
+full scale lands a little quieter (a real 0.6B take measured −18.4 LUFS), because reaching −16
+would need a compressor, which changes how the voice sounds. `--lufs 0` falls back to
+peak-limiting only. Needs `pyloudnorm`
 (in `pyproject.toml`); without it, it degrades to peak-limiting with a warning.
 
 ### Tuning the delivery
@@ -608,8 +611,12 @@ a seconds-per-frame figure that `common.record_speed` calibrates from your own c
 **Restore a take.** Each finished read writes a small session file next to its per-line audio,
 so a take stays repairable after a restart. Restore it from Settings, then use "Fix one line".
 
-**Housekeeping.** Settings can delete per-line audio older than 24 hours that no restorable take
-refers to, with a preview first.
+**Housekeeping.** Settings keeps your latest 25 takes (the ones you can restore) and deletes
+older per-line audio and take files, after a preview. Only files older than 24 hours are
+touched, so a render in progress is never affected.
+
+**Offline and missing models.** With `--offline`, a model that isn't downloaded yet is reported
+by name with how to get it, instead of a connection error.
 
 **Lexicon editor.** `lexicon.txt` is editable in Settings. `textprep` re-reads it whenever the
 file changes, so a saved rule applies to the next generation with no restart.

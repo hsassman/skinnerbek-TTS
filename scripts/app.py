@@ -68,7 +68,9 @@ from common import (  # noqa: E402
     system_report,
     warn_if_instruct_ignored,
 )
-from session import cleanup_orphans, list_sessions, load_session, save_session  # noqa: E402
+from session import (  # noqa: E402
+    KEEP_SESSIONS, cleanup_orphans, list_sessions, load_session, save_session,
+)
 from textprep import LEXICON_PATH  # noqa: E402
 import refclip  # noqa: E402
 import transcribe as asr  # noqa: E402
@@ -545,7 +547,7 @@ def _title(icon: str, title: str, sub: str = "") -> str:
 # ---------------------------------------------------------------------------
 # Generation
 # ---------------------------------------------------------------------------
-def _run_synth(kind: str, p: dict, lines: List[str], events: "queue.Queue"):
+def _run_synth(kind: str, p: dict, lines: List[str], events: "queue.Queue", first_line: int = 0):
     """Generate `lines`, pushing a dict onto `events` as each one lands.
 
     Runs on a worker thread so the request handler can keep yielding progress
@@ -563,7 +565,8 @@ def _run_synth(kind: str, p: dict, lines: List[str], events: "queue.Queue"):
         now = time.time()
         seconds = now - clock["t"]
         clock["t"] = now
-        path = pdir / f"{prefix}_{ts}_{i + 1:03d}.wav"
+        # Named by the line it is in the whole take, so a redo of line 2 is _002.
+        path = pdir / f"{prefix}_{ts}_{first_line + i + 1:03d}.wav"
         sf.write(path, np.asarray(wav, dtype=np.float32), sr)
         part_paths.append(str(path))
         audio = len(wav) / float(sr or 24000)
@@ -621,6 +624,14 @@ def _finish(kind, params, lines, gaps, sr, part_paths):
         visible=(n > 1),
     )
     return str(joined), state, redo
+
+
+def _why(e: BaseException) -> str:
+    """An error for people: our own SystemExit messages are already sentences;
+    anything else keeps its type so a report is still diagnosable."""
+    if isinstance(e, SystemExit):
+        return escape(str(e))
+    return f"{escape(type(e).__name__)}: {escape(str(e))}"
 
 
 def _err(msg: str):
@@ -721,7 +732,7 @@ def _stream(kind: str, params: dict, lines: List[str], gaps: List[int], seed, no
         return
 
     if err is not None:
-        yield _err(f"<strong>Could not generate.</strong><br>{escape(type(err).__name__)}: {escape(str(err))}")
+        yield _err(f"<strong>Could not generate.</strong><br>{_why(err)}")
         return
 
     _wavs, sr, parts = box["result"]
@@ -804,7 +815,7 @@ def do_speak(voice_value, script, size, language, instruct, delivery, tidy, gap_
                   "prefix": f"speak_{ref}"}
         yield from _stream("voice", params, lines, gaps, seed)
     except (Exception, SystemExit) as e:  # noqa: BLE001
-        yield _err(f"<strong>Could not generate.</strong><br>{escape(type(e).__name__)}: {escape(str(e))}")
+        yield _err(f"<strong>Could not generate.</strong><br>{_why(e)}")
 
 
 def do_design(description, script, language, delivery, tidy, gap_ms, para_gap, seed):
@@ -817,7 +828,7 @@ def do_design(description, script, language, delivery, tidy, gap_ms, para_gap, s
                   "prefix": "design"}
         yield from _stream("design", params, lines, gaps, seed)
     except (Exception, SystemExit) as e:  # noqa: BLE001
-        yield _err(f"<strong>Could not generate.</strong><br>{escape(type(e).__name__)}: {escape(str(e))}")
+        yield _err(f"<strong>Could not generate.</strong><br>{_why(e)}")
 
 
 def do_regen_line(state, which, seed):
@@ -836,7 +847,8 @@ def do_regen_line(state, which, seed):
         _CANCEL.clear()
         _seeded(seed)
         events: "queue.Queue" = queue.Queue()
-        _wavs, _sr, new_parts = _run_synth(state["kind"], state["params"], [lines[idx]], events)
+        _wavs, _sr, new_parts = _run_synth(state["kind"], state["params"], [lines[idx]], events,
+                                           first_line=idx)
 
         parts = list(state["parts"])
         parts[idx] = new_parts[0]
@@ -1011,6 +1023,8 @@ def do_add_voice(name, ref_audio, ref_text, xvec_only, size, prof=None,
         if name and not voice_path(name).exists():
             ref_clip_path(name).unlink(missing_ok=True)
         print(f"save voice: {type(e).__name__}: {e}", file=sys.stderr)
+        if isinstance(e, SystemExit):
+            return (_bad(f"<strong>The voice couldn't be saved.</strong><br>{_why(e)}"), *keep)
         return (_bad("<strong>The voice couldn't be saved.</strong> Try again, or pick another "
                      f"name.<br><small>Details: {escape(str(e))}</small>"), *keep)
 
@@ -1039,7 +1053,7 @@ def _suggest_name(path) -> Optional[str]:
     stem = re.sub(r"[^a-z0-9]+", "_", stem).strip("_")[:24].strip("_")
     if not stem or stem.startswith(("tmp", "_ref")) or stem in _GENERIC_NAMES or stem.isdigit():
         return None
-    return stem
+    return stem if is_valid_name(stem) else None
 
 
 def _asr_busy_html(quality: str) -> str:
@@ -1397,14 +1411,14 @@ def do_restore_session(path):
 def do_cleanup(dry_run: bool = False):
     removed = cleanup_orphans(_parts_dir(), max_age_hours=24.0, dry_run=dry_run)
     if not removed:
-        return ('<div class="tts-note tts-note--ok">Nothing to clean &mdash; every per-line file '
-                'belongs to a take you can still restore.</div>')
+        return ('<div class="tts-note tts-note--ok">Nothing to clean &mdash; everything left '
+                'belongs to one of your latest takes.</div>')
     names = "".join(f"<li>{escape(p.name)}</li>" for p in removed[:12])
     more = f"<li>…and {len(removed) - 12} more</li>" if len(removed) > 12 else ""
     verb = "Would delete" if dry_run else "Deleted"
     return (f'<div class="tts-note"><strong>{verb} {len(removed)} orphaned file'
-            f'{"s" if len(removed) != 1 else ""}</strong> (older than 24 h, not part of any '
-            f'restorable take).<ul>{names}{more}</ul></div>')
+            f'{"s" if len(removed) != 1 else ""}</strong> (older than 24 h, not part of your '
+            f'latest {KEEP_SESSIONS} takes).<ul>{names}{more}</ul></div>')
 
 
 def do_system_refresh():
@@ -1907,8 +1921,8 @@ def build_app() -> gr.Blocks:
 
                         with gr.Column(elem_classes="tts-card"):
                             gr.HTML(_title("broom", "Housekeeping",
-                                           "A stopped or crashed run leaves per-line audio behind. This removes "
-                                           "only files older than 24 hours that no restorable take uses."))
+                                           "Every take leaves per-line audio behind. This keeps your latest "
+                                           "25 takes (the ones you can restore) and removes older files."))
                             with gr.Row(elem_classes="tts-actions"):
                                 clean_dry = gr.Button("Preview cleanup", variant="secondary")
                                 clean_btn = gr.Button("Clean up now", variant="stop")

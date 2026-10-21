@@ -2,7 +2,6 @@ import numpy as np
 import pytest
 import torch
 
-import common
 from common import (
     DELIVERY_PRESETS,
     delivery_sampling,
@@ -195,3 +194,18 @@ def test_stitch_rejects_all_stereo_parts(tmp_path):
         parts.append(str(p))
     with pytest.raises(ValueError, match='multichannel'):
         stitch(parts, str(tmp_path / 'joined.wav'))
+
+
+def test_offline_load_of_a_missing_model_says_what_to_do(monkeypatch):
+    import types
+
+    import huggingface_hub
+
+    import common
+
+    monkeypatch.setattr(huggingface_hub, "try_to_load_from_cache", lambda *a, **k: None)
+    monkeypatch.setattr(common, "check_memory", lambda *a, **k: None)
+    args = types.SimpleNamespace(device="cpu", model_size="0.6B", dtype="float32", offline=True,
+                                 low_memory=False, threads=None)
+    with pytest.raises(SystemExit, match="isn't downloaded"):
+        common.load_model("Base", args)

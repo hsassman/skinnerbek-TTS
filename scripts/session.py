@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import time
 import uuid
 from pathlib import Path
@@ -10,6 +11,10 @@ from typing import Any, Dict, List, Optional
 
 SESSION_SUFFIX = ".session.json"
 SESSION_VERSION = 1
+# Settings lists this many takes to restore; cleanup keeps exactly those.
+KEEP_SESSIONS = 25
+# A prefix becomes part of output file names, so it must be a plain name.
+_SAFE_PREFIX = re.compile(r"^\w[\w .-]{0,80}$")
 
 
 def sessions_dir(parts_dir: Path) -> Path:
@@ -53,10 +58,7 @@ def list_sessions(parts_dir: Path, limit: int = 20) -> List[Dict[str, Any]]:
         return out
     for f in files:
         data = _read(f)
-        if not data:
-            continue
-        parts = data.get("parts") or []
-        if not parts or not all(Path(p).is_file() for p in parts):
+        if not data or not _parts_exist(data):
             continue          # a half-deleted take is not repairable; skip it
         data["_path"] = str(f)
         out.append(data)
@@ -89,17 +91,20 @@ def _read(path: Path) -> Optional[Dict[str, Any]]:
         return None
     if type(data.get("sr")) is not int or data["sr"] <= 0:
         return None
-    if "prefix" in data and not isinstance(data["prefix"], str):
+    prefix = data.get("prefix", data["kind"])
+    if not isinstance(prefix, str) or ".." in prefix or not _SAFE_PREFIX.match(prefix):
         return None
     return data
+
+
+def _parts_exist(data: Dict[str, Any]) -> bool:
+    return all(Path(p).is_file() for p in data["parts"])
 
 
 def load_session(path: str) -> Optional[Dict[str, Any]]:
     """Rebuild a `gr.State` payload from a session file, or None if unusable."""
     data = _read(Path(path))
-    if not data:
-        return None
-    if not all(Path(p).is_file() for p in data["parts"]):
+    if not data or not _parts_exist(data):
         return None
     return {
         "kind": data["kind"],
@@ -107,26 +112,37 @@ def load_session(path: str) -> Optional[Dict[str, Any]]:
         "lines": list(data["lines"]),
         "gaps": list(data["gaps"]),
         "parts": list(data["parts"]),
-        "sr": int(data["sr"]),
+        "sr": data["sr"],
         "prefix": data.get("prefix", data["kind"]),
     }
 
 
 def cleanup_orphans(parts_dir: Path, max_age_hours: float = 24.0,
                     dry_run: bool = False) -> List[Path]:
-    """Delete per-line wavs that no session references and that are old enough.
+    """Delete old audio that no kept take needs.
 
-    The age floor is what makes this safe to call while a generation is running:
-    the parts of an in-flight take are seconds old, so they are never candidates.
-    Returns the paths removed (or that would be, when `dry_run`).
+    The newest KEEP_SESSIONS session files (what Settings offers to restore) are
+    kept, and so is every part they name -- even a session too odd to restore,
+    so hand-repaired files aren't lost. Older session files are removed with the
+    parts only they used; otherwise output/parts would grow forever, because
+    every "Fix one line" writes a new session that still names the old part.
+
+    Only files older than `max_age_hours` are candidates, which is what makes
+    this safe while a generation is running. Returns the paths removed (or that
+    would be, when `dry_run`).
     """
     d = Path(parts_dir)
     if not d.is_dir():
         return []
-    # Any session that names a part protects it, even one too malformed to
-    # restore: cleanup must never be stricter than "something points at this".
+    cutoff = time.time() - max_age_hours * 3600
+    try:
+        sessions = sorted(d.glob(f"*{SESSION_SUFFIX}"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        sessions = []
+    kept, stale = sessions[:KEEP_SESSIONS], sessions[KEEP_SESSIONS:]
+
     referenced = set()
-    for f in d.glob(f"*{SESSION_SUFFIX}"):
+    for f in kept:
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -136,8 +152,16 @@ def cleanup_orphans(parts_dir: Path, max_age_hours: float = 24.0,
             if isinstance(p, str) and p and "\0" not in p:
                 referenced.add(str(Path(p).resolve()))
 
-    cutoff = time.time() - max_age_hours * 3600
     removed: List[Path] = []
+    for f in stale:
+        try:
+            if f.stat().st_mtime > cutoff:
+                continue
+            if not dry_run:
+                f.unlink()
+            removed.append(f)
+        except OSError:
+            continue
     for wav in d.glob("*.wav"):
         try:
             if str(wav.resolve()) in referenced or wav.stat().st_mtime > cutoff:
