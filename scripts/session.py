@@ -23,11 +23,7 @@ def sessions_dir(parts_dir: Path) -> Path:
 
 
 def save_session(state: Dict[str, Any], joined: str, parts_dir: Path) -> Optional[Path]:
-    """Write `state` beside its parts. Returns the path, or None if it couldn't.
-
-    Never raises: failing to write a convenience file must not fail a generation
-    the user just waited minutes for.
-    """
+    """Write `state` beside its parts. Returns the path, or None. Never raises."""
     try:
         d = sessions_dir(Path(parts_dir))
         stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -91,8 +87,12 @@ def _read(path: Path) -> Optional[Dict[str, Any]]:
         return None
     if type(data.get("sr")) is not int or data["sr"] <= 0:
         return None
-    prefix = data.get("prefix", data["kind"])
-    if not isinstance(prefix, str) or ".." in prefix or not _SAFE_PREFIX.match(prefix):
+    for prefix in (data.get("prefix", data["kind"]), data["params"].get("prefix", data["kind"])):
+        if not isinstance(prefix, str) or ".." in prefix or not _SAFE_PREFIX.match(prefix):
+            return None
+    # Parts live beside their session file; anything elsewhere is not ours to read.
+    home = Path(path).resolve().parent
+    if any(Path(p).resolve().parent != home for p in parts):
         return None
     return data
 
@@ -119,17 +119,11 @@ def load_session(path: str) -> Optional[Dict[str, Any]]:
 
 def cleanup_orphans(parts_dir: Path, max_age_hours: float = 24.0,
                     dry_run: bool = False) -> List[Path]:
-    """Delete old audio that no kept take needs.
+    """Delete old audio no kept take needs.
 
-    The newest KEEP_SESSIONS session files (what Settings offers to restore) are
-    kept, and so is every part they name -- even a session too odd to restore,
-    so hand-repaired files aren't lost. Older session files are removed with the
-    parts only they used; otherwise output/parts would grow forever, because
-    every "Fix one line" writes a new session that still names the old part.
-
-    Only files older than `max_age_hours` are candidates, which is what makes
-    this safe while a generation is running. Returns the paths removed (or that
-    would be, when `dry_run`).
+    Keeps the newest KEEP_SESSIONS sessions and every part they name. Only files
+    older than `max_age_hours` are touched, so a running generation is safe.
+    Returns the paths removed (or that would be, with `dry_run`).
     """
     d = Path(parts_dir)
     if not d.is_dir():

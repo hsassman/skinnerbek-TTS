@@ -1,8 +1,5 @@
-// Reference-clip recorder. Runs as a gr.HTML `js_on_load`, so `element`,
-// `props`, `trigger` and `upload` are provided by Gradio.
-//
-// Reports microphone errors and encodes mono 24 kHz WAV locally.
-// props.value carries the upload path without replacing the recorder DOM.
+// Reference-clip recorder: a gr.HTML `js_on_load` (Gradio provides element, props,
+// trigger, upload). Records mono 24 kHz WAV locally; props.value carries the upload path.
 (() => {
   const TARGET_SR = 24000, MIN_S = 5, GOOD_S = 30, MAX_S = 45;
   const host = element.querySelector('.tts-rec') || element;

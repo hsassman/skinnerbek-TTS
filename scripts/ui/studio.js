@@ -1,7 +1,5 @@
-// App-wide behaviour, injected through launch(head=...) as a plain script.
-// Gradio 6 inserts `head` twice (in the served HTML and again from the SPA,
-// possibly after DOMContentLoaded), and launch(js=...) did not fire here, so
-// this guards against running twice and starts whenever it lands.
+// App-wide behaviour, injected via launch(head=...). Gradio 6 inserts `head` twice,
+// so this guards against running twice.
 (() => {
 if (window.__skbStudio) return;
 window.__skbStudio = true;
@@ -43,8 +41,7 @@ const boot = () => {
     }
   });
 
-  // Gradio renders lazily, so late-arriving nodes get the same treatment:
-  // the theme toggle reports its state, and status slots become polite live regions (their content is what changes).
+  // Gradio renders lazily: label late nodes (theme toggle state, polite status regions).
   const onDom = () => {
     document.querySelectorAll('.tts-status:not([aria-live])').forEach((el) => {
       el.setAttribute('aria-live', 'polite');
@@ -61,10 +58,8 @@ const boot = () => {
   });
   onDom();
 
-  // Guided tour (driver.js, vendored). Shows itself on the first few visits
-  // until it is finished or someone ticks "Don't show this again"; after
-  // MAX_AUTO visits it stops offering itself either way. "Take the tour" in
-  // the header replays it any time.
+  // Guided tour (driver.js). Auto-shows on the first MAX_AUTO visits until finished
+  // or dismissed; "Take the tour" replays it.
   const MAX_AUTO = 3;
   const visits = (parseInt(store.get('skb-visits') || '0', 10) || 0) + 1;
   store.set('skb-visits', String(visits));

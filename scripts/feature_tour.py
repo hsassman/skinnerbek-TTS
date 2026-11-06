@@ -1,15 +1,8 @@
-"""A guided tour + smoke test of the read-quality features.
-
-Runs quickly and needs no model: it exercises the text preparation, the pronunciation
-lexicon, the loudness normalisation, the low-memory dtype policy, the reference-clip
-cache and the per-line re-stitch, printing what each one does on a worked example.
+"""A quick tour and smoke test of the read-quality features (no model needed).
 
     python scripts/feature_tour.py               # the fast tour (no model)
     python scripts/feature_tour.py --generate     # + one real 0.6B generation (slow)
     python scripts/feature_tour.py --generate --online   # allow HF network checks
-
-The `--generate` step shells out to `tts.py preset` with every feature turned on
-(low-memory, steady delivery, text tidy-up, -16 LUFS) and reports the resulting wav.
 """
 from __future__ import annotations
 

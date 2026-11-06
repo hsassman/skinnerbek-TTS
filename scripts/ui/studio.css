@@ -763,7 +763,7 @@ kbd {
 .gradio-container .tts-card .block.tts-result:has(.empty) * { display: none !important; }
 
 /* ===========================================================================
-   Review round 2
+   Alignment
    =========================================================================== */
 /* Accordion headers: a chevron that points down when closed and up when open
    (Gradio's rotated "▼" glyph read as a back arrow when collapsed). */
@@ -797,19 +797,14 @@ kbd {
 /* The footer shares the content's left edge. */
 .gradio-container .tts-foot { padding-left: 0; padding-right: 0; }
 
-/* gr.HTML wraps content in a 12px-padded container. Titles, panels and the
-   recorder inside a card share the inputs' left edge; the welcome strip and
-   footer share the cards' edge. */
+/* gr.HTML adds 12px padding; line card contents up with the inputs' left edge. */
 .gradio-container .html-container:has(.tts-foot),
 .gradio-container .tts-card .html-container { padding-left: 0 !important; padding-right: 0 !important; }
 
 /* ===========================================================================
-   Review round 3: hero, card alignment, input states
+   Hero, card alignment, input states
    =========================================================================== */
-/* Hero: the banner is the header's own background -- fitted to the header's
-   top-right, fading into ink on the left and towards the stats -- so it sits
-   inside the rounded frame instead of floating as a box. --tts-hero-img is
-   set from app.py when assets/banner.* exists. */
+/* Hero: assets/banner.* (set as --tts-hero-img by app.py) is the header background. */
 .gradio-container .tts-head {
   padding: var(--tts-s7) !important;
   gap: var(--tts-s6) !important;
@@ -852,10 +847,8 @@ kbd {
 .gradio-container .tts-col > .tts-card:last-child { flex-grow: 1 !important; }
 .gradio-container .tts-card--sticky { position: static !important; }
 
-/* Inputs: Gradio's blocks clip their overflow, which cut the focus ring off at
-   the edges (and left marks in the corners). Let it show, use one radius, and
-   give every field the same hover and focus treatment -- text boxes and
-   dropdowns alike (a dropdown's border lives on its outer .wrap). */
+/* Inputs: let the focus ring show (Gradio clips overflow); one radius, hover and
+   focus style for every field (a dropdown's border is on its outer .wrap). */
 .gradio-container .tts-card .block { overflow: visible !important; }
 .gradio-container .tts-card :is(textarea, input[type="text"], input[type="number"]),
 .gradio-container .tts-card .wrap:has(input[role="listbox"]) {
@@ -876,9 +869,7 @@ kbd {
   outline: none !important;
 }
 
-/* Centring the app made Gradio's main column (and so the tab panel)
-   shrink-to-fit the active tab, so a tab with little in it (Recordings) came
-   out narrower and off-centre. They always span the full content width. */
+/* Full width, so short tabs don't shrink and drift off-centre. */
 .gradio-container main.contain,
 .gradio-container main.contain > .column,
 .gradio-container .tts-tabs,
@@ -890,9 +881,7 @@ kbd {
    centred layout sideways when switching tabs. */
 html { scrollbar-gutter: stable; }
 
-/* The masthead is ink in both themes, but Gradio's `.prose *` colours every
-   descendant with the page's body colour -- dark in light mode. Keep the
-   masthead note's summary and body light. */
+/* The masthead is dark in both themes; override Gradio's `.prose *` text colour. */
 .gradio-container .tts-head .tts-note, .gradio-container .tts-head .tts-note * { color: #e6eaf3 !important; }
 
 /* Read-aloud: a plain panel -- no accent bar or rule. */
@@ -910,12 +899,9 @@ html { scrollbar-gutter: stable; }
 .tts-iconbtn svg { flex: none; display: block; }
 
 /* ===========================================================================
-   Round 4: theme-aware masthead, clone-first landing, transcript, voice read,
-   guided tour
+   Theme-aware masthead, clone-first landing, transcript, voice read, tour
    =========================================================================== */
-/* Masthead, light theme: the dawn banner on cream. Same layers as the night
-   version -- a wash from the left for the text, one from the bottom for the
-   stats -- so the two themes share one composition. */
+/* Masthead, light theme: the dawn banner, same layering as the dark theme. */
 body:not(.dark) .gradio-container .tts-head {
   border-color: var(--tts-border) !important;
   box-shadow: 0 1px 2px rgba(23,26,38,.05), 0 12px 32px rgba(191,54,38,.08) !important;
@@ -926,9 +912,8 @@ body:not(.dark) .gradio-container .tts-head {
     radial-gradient(90% 120% at 0% 100%, rgba(255,107,90,.08), transparent 60%),
     #f8f4ef !important;
 }
-/* Gradio copies every custom rule under a `.gradio-container.gradio-container-x .contain`
-   prefix that outranks a selector starting at <body>, so the light-theme overrides
-   below are !important. They only ever match without .dark, so nothing else is lost. */
+/* Gradio's prefixed copies of these rules outrank <body> selectors, so the
+   light-theme overrides below use !important (they never match under .dark). */
 body:not(.dark) .tts-hero h1 { color: var(--tts-text) !important; }
 /* The bright brand gradient is ~1.7:1 on cream; this deeper run keeps the
    28px bold word above 3:1 at its lightest stop. */
@@ -970,11 +955,8 @@ body:not(.dark) .tts-head :focus-visible { outline-color: var(--tts-accent) !imp
   box-shadow: var(--tts-shadow), 0 0 0 4px color-mix(in srgb, var(--tts-accent) 7%, transparent) !important;
 }
 
-/* Drop zone: the clip upload is the hero action, so it is big, dashed and
-   says what it takes. An empty gr.Audio renders a single upload button
-   (button.center); a loaded one renders the player instead. Gradio's own
-   "Drop Audio Here - or - Click to Upload" stays in the DOM as the button's
-   accessible name and is replaced visually by a plainer line. */
+/* Drop zone: the main action. An empty gr.Audio is one upload button (button.center);
+   Gradio's own text stays as its accessible name, shown as a plainer line. */
 /* Empty state only: the block's own panel would sit behind the dashed box. */
 .gradio-container .tts-card .tts-drop:has(button.center) { border: 0 !important; background: transparent !important; box-shadow: none !important; padding: 0 !important; }
 .gradio-container .tts-drop .audio-container:has(button.center) { height: auto !important; }

@@ -1,27 +1,12 @@
-"""Launch a Qwen3-TTS web UI with settings that work on this machine.
+"""Launch a web UI.
 
-Two UIs are available:
+    python scripts/launch_ui.py            # Skinnerbek Studio (scripts/app.py)
+    python scripts/launch_ui.py preset     # bundled qwen_tts demo: preset voices
+    python scripts/launch_ui.py design     # bundled qwen_tts demo: voice design (1.7B)
+    python scripts/launch_ui.py clone      # bundled qwen_tts demo: cloning
 
-    python scripts/launch_ui.py            # the simple all-in-one app (scripts/app.py)
-    python scripts/launch_ui.py preset     # the bundled qwen_tts demo, preset voices
-    python scripts/launch_ui.py design     # the bundled qwen_tts demo, voice design (1.7B)
-    python scripts/launch_ui.py clone      # the bundled qwen_tts demo, cloning + save/load
-
-With no mode this hands off to `scripts/app.py`: one page with a script box, a
-voice list (built-in speakers plus anything you've saved), a "describe a voice"
-tab and a "voice library" tab. That's the one to use unless you specifically
-want the original demo.
-
-The bundled demo (`qwen-tts-demo`) defaults to --device cuda:0 and
-FlashAttention-2, neither of which exists here (AMD GPU, CPU-only torch, no
-flash-attn). Running it unmodified fails. The mode wrappers below flip those
-defaults to cpu/no-flash-attn and pick a dtype that fits in RAM (see
-common.resolve_dtype: the 1.7B models need bfloat16 on this 8GB box). One
-checkpoint per process.
-
-Generation is slow on CPU -- expect tens of seconds to minutes per line. Voices
-use the same .pt format in both UIs and `tts.py voices`, so a
-voice made in one place works everywhere; save into voices/ to share it.
+The bundled demo defaults to CUDA and FlashAttention-2; the modes switch it to
+CPU and a dtype that fits in RAM. It has no login, so it only runs locally.
 """
 import argparse
 import sys
@@ -52,14 +37,13 @@ def main() -> int:
     )
     parser.add_argument("--port", type=int, default=8000, help="Port to serve on (default: 8000)")
     parser.add_argument("--ip", default="127.0.0.1", help="Bind address (default: 127.0.0.1, local only)")
-    parser.add_argument("--share", action="store_true", help="Create a public Gradio link")
+    parser.add_argument("--share", action="store_true", help="Create a public Gradio link (app only, needs --auth)")
+    parser.add_argument("--auth", metavar="USER:PASSWORD", help="(all-in-one app only) require this login")
     parser.add_argument("--chunk-size", type=int, default=1,
                         help="(all-in-one app only) lines generated per model call; "
                              "1 = lowest RAM, 0 = one batch. See scripts/app.py.")
     add_model_args(parser)
-    # `mode` is positional, so --model-size can't be restricted per-kind at parse time the way
-    # tts.py does it. Default to None and resolve below, so we only complain when the size was
-    # actually asked for rather than on every design run.
+    # Resolved per mode below (`mode` is positional, so argparse can't restrict it).
     parser.set_defaults(model_size=None)
     args = parser.parse_args()
 
@@ -69,6 +53,8 @@ def main() -> int:
                     "--dtype", args.dtype]
         if args.share:
             app_argv.append("--share")
+        if args.auth:
+            app_argv += ["--auth", args.auth]
         if args.offline:
             app_argv.append("--offline")
         if getattr(args, "low_memory", False):
@@ -80,6 +66,10 @@ def main() -> int:
         import app  # local module; scripts/ is on sys.path (same as `from common import ...` above)
 
         return app.main()
+
+    if args.share or args.ip not in ("127.0.0.1", "localhost", "::1"):
+        parser.error("the bundled demo has no login, so it only runs on this machine "
+                     "(no --share, --ip 127.0.0.1)")
 
     kind = KINDS[args.mode]
     available = MODEL_SIZES[kind]
@@ -99,8 +89,7 @@ def main() -> int:
         )
 
     repo = model_id(kind, args.model_size)
-    # Same reasoning as common.resolve_dtype: float32 for the 1.7B models would need ~7.7GB of
-    # weights and crash this box, so let the shared policy decide.
+    # Shared dtype policy (1.7B as float32 doesn't fit in 8 GB).
     dtype = resolve_dtype(args.device, args.model_size, args.dtype)
     check_memory(args.model_size, dtype)
     dtype_name = str(dtype).split(".")[-1]
@@ -114,8 +103,6 @@ def main() -> int:
     ]
     if not args.device.startswith("cuda"):
         demo_argv.append("--no-flash-attn")
-    if args.share:
-        demo_argv.append("--share")
 
     if args.mode == "clone":
         VOICES_DIR.mkdir(parents=True, exist_ok=True)

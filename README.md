@@ -11,6 +11,36 @@ preparation, a reusable voice library, per-line generation with repair, and loud
 It all runs fully offline on a CPU-only Windows PC, with a command-line tool and a browser app.
 Fine-tuning a dedicated accent model is the next stage (see [Status and roadmap](#status-and-roadmap)).
 
+## Quick start
+
+No technical setup needed. Download the project (green **Code** button → **Download ZIP**),
+extract it, then:
+
+- **Windows 10/11:** double-click **`start.bat`**. If Windows shows "Windows protected your
+  PC", click **More info → Run anyway**.
+- **Mac (Apple silicon, M1 or newer):** double-click **`start.command`**. If macOS blocks it,
+  open **System Settings → Privacy & Security** and click **Open Anyway**, then double-click it
+  again.
+
+The first start downloads a private copy of Python (3.12), the app's components and the voice
+models: about **9 GB**, once. After that it starts offline in under a minute. Your browser opens
+on Skinnerbek Studio; keep the black window open while you use it, and close it to stop the app.
+Starting it again while it runs just reopens the browser tab.
+
+Everything installs into one folder, so removing it is one delete:
+`%LOCALAPPDATA%\SkinnerbekStudio` on Windows, `~/Library/Application Support/SkinnerbekStudio`
+on a Mac (the models live in `~/.cache/huggingface` and `~/.cache/skinnerbek`).
+
+## Screenshots and promo
+
+| Clone a voice | Speak (dark theme) | Settings |
+|---|---|---|
+| ![Clone tab: drop a clip to start a voice](docs/screenshots/clone.webp) | ![Speak tab with a sample script](docs/screenshots/speak-dark.webp) | ![Settings: machine report and lexicon](docs/screenshots/settings.webp) |
+
+[![Skinnerbek promo video (66 s, 720p)](docs/promo/poster.webp)](docs/promo/skinnerbek-promo.mp4)
+
+*Promo video, 66 s. Photography is illustrative; app scenes are recreated from the real interface.*
+
 ## Features
 
 - **Three ways to make a voice.** Clone one from a reference clip (the accent path), design one
@@ -80,12 +110,12 @@ this repository.
 
 | | |
 |---|---|
-| OS | Windows 10/11 (developed and tested on Windows 10) |
-| Python | 3.10+, tested on **3.12.2** |
+| OS | Windows 10/11 (developed and tested on Windows 10), or macOS on Apple silicon via `start.command` (not yet tested on a Mac) |
+| Python | 3.11+, tested on **3.12.2**. `start.bat` / `start.command` install their own 3.12 |
 | GPU | **Not required.** Runs CPU-only by default. A CUDA GPU can be used with `--device cuda:0` (not yet tested; CUDA version follows your PyTorch build) |
 | GPU VRAM | n/a on CPU. Roughly 2 GB for the 0.6B models and 4 GB for 1.7B in bfloat16 |
 | RAM | 8 GB minimum (0.6B models; 1.7B only in bfloat16 with other apps closed). **16–32 GB recommended** |
-| Disk | A few GB for the Hugging Face model cache (VoiceDesign 1.7B alone is ~3.5 GB), plus 0.5–1.6 GB for the speech-recognition models |
+| Disk | About 9 GB with the quick start (Python and packages ~1.5 GB, 0.6B voice models ~4.8 GB, speech recognition ~2.1 GB). VoiceDesign 1.7B adds ~3.5 GB |
 
 Pinned dependency versions are in [requirements.txt](requirements.txt) (mirrored in
 [pyproject.toml](pyproject.toml)).
@@ -136,7 +166,9 @@ cloning, and the model weights are unchanged. The planned fine-tuning stage is:
 ## Project structure
 
 ```
+start.bat / start.command  one-click launchers (Windows / Mac)
 scripts/
+  start.py               launcher core: model download, free port, opens the browser
   tts.py                 CLI: info, preset, design, clone, voices
   app.py                 all-in-one Gradio web app
   common.py              model loading, delivery presets, generation loop, loudness, stitching
@@ -152,7 +184,8 @@ scripts/
   ui/                    studio.css, studio.js, recorder.js: the web app's styles and browser code
   ui/vendor/             driver.js 1.8.0 (MIT) for the guided tour, bundled so it works offline
 assets/                  logo, favicon, masthead banners (night and dawn)
-tests/                   pytest suite (144 tests, no model download needed)
+docs/                    README screenshots and the promo video
+tests/                   pytest suite (173 tests, no model download needed)
 lexicon.txt              pronunciation overrides
 samples/quick_test.txt   short script for smoke-testing an install
 samples/ voices/ output/ local-only: reference clips, voice fingerprints, generated audio (gitignored)
@@ -173,7 +206,9 @@ samples/ voices/ output/ local-only: reference clips, voice fingerprints, genera
 - Done: cloning with the 0.6B Base model keeps the Cape Flats accent, judged by ear against a
   real reference speaker.
 - Done: text prep, the voice library, the web app with line-level repair, and loudness
-  mastering. All 91 unit tests pass.
+  mastering. All 173 unit tests pass.
+- Done: one-click start scripts for Windows and Mac, and a security audit with fixes
+  ([SECURITY.md](SECURITY.md)). The Mac script has not yet been run on a Mac.
 - Known limitation: 0.6B clones come out consistently about 20 Hz higher in pitch than the
   reference.
 - Next: evaluate the 1.7B models on a 32 GB machine. This is the expected fix for the pitch
@@ -483,9 +518,13 @@ it or the delivery preset.
 ```powershell
 python app.py                 # http://127.0.0.1:7860, opens your browser
 python app.py --offline       # skip Hugging Face network checks (see Gotchas)
-python app.py --port 8000 --share
+python app.py --share --auth me:a-long-password   # public link; a login is required
 python app.py --mock          # development: a fast stand-in model, no checkpoint loaded
 ```
+
+`--share` or a non-local `--host` refuses to start without `--auth USER:PASSWORD`. On the
+default local address the app only answers requests addressed to `127.0.0.1`/`localhost`, and
+no other site can frame it (see [SECURITY.md](SECURITY.md)).
 
 `python launch_ui.py` with no argument launches the same app. It has a light and a dark theme
 (toggle at the top right, remembered per browser; the header banner changes with it, night or
@@ -650,8 +689,14 @@ python launch_ui.py design
 python launch_ui.py clone     # has a Save/Load Voice tab; save into voices\ to share with the CLI
 ```
 
-Serves on `http://127.0.0.1:8000` (local only; `--share` for a public link). Add `--offline` if
-startup stalls on Hugging Face — see Gotchas above.
+Serves on `http://127.0.0.1:8000`, local only (the demo has no login, so `--share` is refused).
+Add `--offline` if startup stalls on Hugging Face — see Gotchas above.
+
+## Security
+
+A source-level security audit (Cloudflare's
+[security-audit skill](https://github.com/cloudflare/security-audit-skill), quick profile) and
+the fixes that followed are summarised in [SECURITY.md](SECURITY.md).
 
 ## Testing
 

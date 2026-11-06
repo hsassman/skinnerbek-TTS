@@ -18,6 +18,10 @@ htmlcov/
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.p12
+credentials*.json
 
 # --- Logs and experiment tracking ---
 *.log
@@ -51,6 +55,11 @@ datasets/
 *.flac
 *.ogg
 *.m4a
+*.webm
+*.opus
+*.aac
+*.aif
+*.aiff
 *.parquet
 *.arrow
 
@@ -69,6 +78,9 @@ samples/*
 # speaker fingerprint. Regenerate with `tts.py voices add` rather than commit.
 voices/*
 !voices/.gitkeep
+
+# Gradio's local cache
+.gradio/
 
 # --- OS / editor ---
 Thumbs.db

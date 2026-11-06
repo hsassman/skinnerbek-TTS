@@ -1,29 +1,10 @@
-"""Prepare written text so Qwen3-TTS *reads* it well.
+"""Prepare written text so the model reads it well.
 
-The 0.6B CustomVoice checkpoint has no style control (`instruct` is dropped) and
-tends to rush and mangle anything that isn't plain prose. We can't change the
-weights, but we can change what the model sees:
+Normalises punctuation, abbreviations and numbers; splits into sentences (long
+ones at a clause boundary); sets longer pauses between paragraphs; applies the
+user's lexicon.txt. Entry point: prepare_script(text) -> (lines, gaps_ms).
 
-    * normalise the text        -- ASCII punctuation, expanded abbreviations,
-                                   numbers/money/years/times spelt out, markdown
-                                   noise stripped, a full stop added so the model
-                                   doesn't trail off or clip the last word.
-    * segment it sensibly       -- one sentence per generation, and any sentence
-                                   longer than `max_words` broken at a clause
-                                   boundary near its middle. Each chunk
-                                   re-conditions on the voice, which is what stops
-                                   the model speeding up and drifting off pitch.
-    * pace it                   -- a longer silence between paragraphs (blank
-                                   line) than between sentences.
-    * fix names it gets wrong   -- an optional user lexicon (`lexicon.txt` at the
-                                   repo root): `Nguyen -> win`, `SQL -> sequel`.
-
-`prepare_script(text)` is the single entry point. It returns
-`(lines, gaps_ms)`: the text to speak line by line, and the silence to place
-*before* each line when the lines are joined (`gaps_ms[0]` is always 0).
-
-Everything here is pure string work -- no model, no torch -- so it is cheap and
-unit-testable on its own (`python scripts/textprep.py --selftest`).
+Pure string work: `python scripts/textprep.py --selftest`.
 """
 from __future__ import annotations
 
@@ -40,11 +21,10 @@ _LEXICON_MTIME: Optional[float] = None
 
 
 def load_lexicon(path=None) -> List[Tuple["re.Pattern[str]", str]]:
-    """Parse `lexicon.txt` into (compiled pattern, replacement) rules.
+    """Parse lexicon.txt into (pattern, replacement) rules.
 
-    Format: `pattern -> replacement`, one per line, `#` starts a comment.
-    A bare pattern matches a whole word case-insensitively; wrap it in `/.../`
-    for a raw regex. Missing file -> no rules.
+    One `pattern -> replacement` per line, `#` comments. A bare pattern matches a
+    whole word, case-insensitively; `/.../` is a raw regex.
     """
     p = Path(path) if path is not None else LEXICON_PATH
     rules: List[Tuple["re.Pattern[str]", str]] = []
@@ -65,6 +45,7 @@ def load_lexicon(path=None) -> List[Tuple["re.Pattern[str]", str]]:
                 rx = re.compile(pat[1:-1])
             else:
                 rx = re.compile(r"\b" + re.escape(pat) + r"\b", re.IGNORECASE)
+            rx.sub(rep, "")  # a bad group reference in `rep` would fail every line later
         except re.error:
             continue
         rules.append((rx, rep))
@@ -103,9 +84,7 @@ _PUNCT_MAP = {
 }
 
 
-# Non-ASCII characters that still carry meaning and must survive to the number
-# expander. Dropping the currency symbols here used to strip the "£" off
-# "£999.99" before _expand_numbers ever saw it, so the money rule never fired.
+# Non-ASCII characters the number expander needs (currency and degree signs).
 _KEEP_NON_ASCII = "£€¥°"
 
 
@@ -121,7 +100,8 @@ def _to_ascii_punct(text: str) -> str:
 
 # --- markdown / layout noise ---------------------------------------------------
 
-_MD_LINK = re.compile(r"\[([^\]]+)\]\((?:[^)]+)\)")
+# Neither part may span another bracket, which keeps matching linear on "[[[[" or "](((".
+_MD_LINK = re.compile(r"\[([^\[\]]+)\]\((?:[^()]+)\)")
 _MD_EMPH = re.compile(r"(\*\*|__|\*|_|`)")
 _MD_BULLET = re.compile(r"^\s*(?:[-*+•]|\d+[.)])\s+")
 _MD_HEADING = re.compile(r"^\s*#{1,6}\s+")
@@ -186,8 +166,7 @@ def _year_to_words(n: int) -> str:
     if n < 1100 or n > 2099:
         return _int_to_words(n)
     hi, lo = divmod(n, 100)
-    # 2000-2009 first: "two thousand", "two thousand and seven". Checking lo == 0
-    # ahead of this used to catch 2000 and read it as "twenty hundred".
+    # 2000-2009 first, or 2000 reads as "twenty hundred".
     if 2000 <= n <= 2009:
         return _int_to_words(n)
     if lo == 0:
@@ -200,8 +179,7 @@ def _digits_to_words(s: str) -> str:
     return " ".join("oh" if d == "0" else _ONES[int(d)] for d in s)
 
 
-# (major singular, major plural, minor singular, minor plural). Naive "+s"
-# pluralisation gets "pences" and "rands" wrong, so spell both forms out.
+# (major singular, major plural, minor singular, minor plural).
 _CURRENCY = {
     "$": ("dollar", "dollars", "cent", "cents"),
     "£": ("pound", "pounds", "penny", "pence"),
@@ -211,7 +189,19 @@ _CURRENCY = {
 }
 
 
+_LONG_RUN = re.compile(r"[\d,.]{41,}")
+
+
+def _break_long_runs(text: str) -> str:
+    """Split digit/comma runs longer than any real number into 20-character
+    groups, so the number patterns below can't backtrack across them."""
+    return _LONG_RUN.sub(lambda m: " ".join(m.group(0)[i:i + 20]
+                                            for i in range(0, len(m.group(0)), 20)), text)
+
+
 def _expand_numbers(text: str) -> str:
+    text = _break_long_runs(text)
+
     # $1,250.50 / £3.99  -> words
     def money(m: re.Match) -> str:
         sym, whole, frac = m.group(1), m.group(2).replace(",", ""), m.group(3)
@@ -266,12 +256,8 @@ def _expand_numbers(text: str) -> str:
     # long digit runs (phone numbers, PINs): read digit by digit
     text = re.sub(r"\b\d{5,}\b", lambda m: _digits_to_words(m.group(0)), text)
 
-    # decimals and plain integers (with thousands separators).
-    #
-    # The integer lookahead deliberately rejects only a *digit* after an optional
-    # dot, not any dot. `(?![\w.])` used to reject a sentence-final full stop too,
-    # so "roughly 1,150." backtracked until it matched the bare leading "1" and
-    # produced "roughly one,150." -- any number ending a sentence was mangled.
+    # Decimals, then integers. The integer lookahead rejects a following digit, not
+    # a full stop, so "roughly 1,150." at a sentence end still reads correctly.
     text = re.sub(r"(?<![\w.])\d[\d,]*\.\d+(?![\w])", lambda m: _decimalish(m.group(0)), text)
     text = re.sub(r"(?<![\w.])(\d[\d,]*)(?!\.?\d)(?!\w)",
                   lambda m: _int_to_words(int(m.group(1).replace(",", ""))), text)
@@ -279,11 +265,10 @@ def _expand_numbers(text: str) -> str:
 
 
 def spell_out_numbers(text: str) -> str:
-    """Numbers, money, times and percentages as words, nothing else touched.
-    Used on automatic transcripts: a cloning transcript should read the way
-    the clip *sounds* ("twenty-four", not "24"). Codes that mix letters and
-    digits (HTD-189, MP3, A4) are left as written: nobody says "HTD one
-    hundred and eighty-nine", and the person can't know how it was read."""
+    """Numbers, money, times and percentages as words, nothing else.
+
+    For transcripts, which should match how the clip sounds. Letter-digit codes
+    (HTD-189, MP3) are left as written."""
     codes: List[str] = []
 
     def keep(m: re.Match) -> str:
@@ -314,17 +299,13 @@ _ABBREV = [
     (r"\bapprox\.\s", "approximately "), (r"\bDept\.\s", "Department "),
     (r"\bNo\.\s?(?=\d)", "number "), (r"\ba\.m\.\b", "AM"), (r"\bp\.m\.\b", "PM"),
     (r"\bU\.S\.\b", "US"), (r"\bU\.K\.\b", "UK"),
-    # These end in a full stop and are routinely followed by a capitalised word
-    # ("excl. VAT"), so leaving them unexpanded also creates a false sentence
-    # boundary in _SENT_SPLIT -- expanding them fixes the read and the split.
+    # Expanding these also stops "excl. VAT" being split as two sentences.
     (r"\bexcl\.\s", "excluding "), (r"\bincl\.\s", "including "),
     (r"\best\.\s", "estimated "), (r"\bcf\.\s", "compare "),
     (r"\bFig\.\s", "Figure "), (r"\bJr\.", "Junior"), (r"\bSr\.", "Senior"),
 ]
 
-# Only expanded directly after a number, so "5 cm" reads but the word "cm" alone
-# (or a name like "Mg") is left untouched. Case-sensitive on purpose: "MB" is a
-# megabyte, "Mb" usually is not what the writer meant to say aloud.
+# Units, expanded only after a number. Case-sensitive ("MB" is a megabyte).
 _UNITS = [
     ("mm", "millimetres"), ("cm", "centimetres"), ("km", "kilometres"),
     ("kg", "kilograms"), ("mg", "milligrams"), ("ml", "millilitres"),
@@ -337,8 +318,7 @@ _ROMAN = {
     "I": "one", "II": "two", "III": "three", "IV": "four", "V": "five",
     "VI": "six", "VII": "seven", "VIII": "eight", "IX": "nine", "X": "ten",
 }
-# Longest-first so "VIII" isn't matched as "V". Only after a label word, so a
-# stray "I" or "X" in ordinary prose is never touched.
+# Longest-first ("VIII" before "V"), and only after a label word like "Chapter".
 _ROMAN_RX = re.compile(
     r"\b(Mk|MK|Mark|Type|Phase|Part|Chapter|Volume|Book|Class)\s+"
     r"(VIII|VII|VI|IV|IX|III|II|I|X|V)\b"
@@ -363,9 +343,7 @@ def _expand_abbrev(text: str) -> str:
     for pat, rep in _ABBREV:
         text = re.sub(pat, rep, text)
     text = re.sub(r"\s&\s", " and ", text)
-    # "support@example.com" -> "support at example dot com". Without the second
-    # rule the dot survives into normalize_line's "space after punctuation" pass
-    # and comes out as "example. com", which the model reads as a sentence end.
+    # "a@b.com" -> "a at b dot com"; a bare dot would be read as a sentence end.
     text = re.sub(r"(?<=\w)@(?=\w)", " at ", text)
     text = re.sub(r"(?<=\w)\.(?=(?:com|net|org|io|co|gov|edu|ai)\b)", " dot ", text, flags=re.I)
     text = re.sub(r"\bw/\b", "with ", text)
@@ -384,11 +362,7 @@ _TERMINAL = tuple('.!?:;,"\')]')
 
 
 def normalize_line(line: str, lexicon: bool = True) -> str:
-    """Clean a single line of text for the model. Safe to call twice.
-
-    `lexicon` applies the user's `lexicon.txt` pronunciation overrides first,
-    before abbreviations and numbers are expanded.
-    """
+    """Clean one line for the model (idempotent). The lexicon applies first."""
     line = _to_ascii_punct(line)
     line = _strip_markdown(line)
     if lexicon:
@@ -407,12 +381,9 @@ def normalize_line(line: str, lexicon: bool = True) -> str:
 
 # --- segmentation ------------------------------------------------------------
 
-# `(?<!\s[A-Z]\.)` keeps an initial from ending a sentence: "Doctor A. Nguyen"
-# used to split into "...Doctor A." | "Nguyen joined...", which stranded the
-# surname on its own line and made the model read the initial as a full stop.
+# `(?<!\s[A-Z]\.)`: an initial ("Doctor A. Nguyen") doesn't end a sentence.
 _SENT_SPLIT = re.compile(r"(?<=[.!?])(?<!\s[A-Z]\.)(?:\"|')?\s+(?=[A-Z0-9\"'(])")
-# Strong boundaries first -- a semicolon/colon/dash is nearly always a safe place
-# to breathe. Only fall back to commas and conjunctions when there's no strong one.
+# Split points: semicolon, colon or dash first; commas and conjunctions as a fallback.
 _STRONG_MARKS = ["; ", ": ", " - "]
 _WEAK_MARKS = [", ", " and ", " but ", " so ", " because ", " which ",
                " while ", " although ", " though ", " whereas "]
@@ -437,13 +408,8 @@ def _is_num_edge(text: str, at_end: bool) -> bool:
 
 
 def _split_long(sentence: str, max_words: int) -> List[str]:
-    """Break one over-long sentence at a clause boundary near its middle.
-
-    Strong marks (; : -) are tried first; commas and conjunctions only if there
-    is no strong one. A candidate is rejected if either side of it is the middle
-    of a spelt-out number ("two hundred | and fifty"), so number expansion never
-    gets chopped in half.
-    """
+    """Break an over-long sentence at a clause boundary near its middle, never
+    inside a spelt-out number."""
     if max_words <= 0 or _word_count(sentence) <= int(max_words * 1.15):
         return [sentence]
 
@@ -477,12 +443,8 @@ def _split_long(sentence: str, max_words: int) -> List[str]:
 
 
 def segment_text(text: str, max_words: int = 24, lexicon: bool = True) -> List[Tuple[str, bool]]:
-    """(chunk, starts_new_paragraph) in reading order.
-
-    Hard newlines in the input are respected as breaks; a blank line marks a
-    paragraph. Within a block, text is split into sentences and any sentence
-    longer than `max_words` is split further at a clause boundary.
-    """
+    """(chunk, starts_new_paragraph) in reading order. Newlines break, blank lines
+    start paragraphs, and sentences over `max_words` are split."""
     out: List[Tuple[str, bool]] = []
     blocks = re.split(r"\n[ \t]*\n+", (text or "").replace("\r\n", "\n").replace("\r", "\n"))
     for b_idx, block in enumerate(blocks):
@@ -520,18 +482,15 @@ def prepare_script(
     sentence_gap_ms: int = 300,
     paragraph_gap_ms: int = 650,
 ) -> Tuple[List[str], List[int]]:
-    """Turn a block of writing into (lines_to_speak, gap_before_each_line_ms).
+    """Text -> (lines_to_speak, gap_before_each_line_ms); gaps[0] is 0.
 
-    `gaps[0]` is always 0. When `normalize` is False the text is still split into
-    explicit lines but not rewritten -- use it if the cleanup mangles something;
-    `lexicon.txt` pronunciation overrides are still applied unless `lexicon=False`.
+    normalize=False only splits lines (the lexicon still applies unless lexicon=False).
     Raises ValueError if there is nothing to say.
     """
     if normalize:
         segments = segment_text(text, max_words=max_words, lexicon=lexicon)
     else:
-        # Honour explicit line breaks only, but still run the pronunciation
-        # lexicon, and keep blank-line paragraph breaks so their pause applies.
+        # Explicit line breaks only; still apply the lexicon and paragraph pauses.
         segments = []
         blank_before = False
         for ln in (text or "").splitlines():

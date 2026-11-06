@@ -1,7 +1,4 @@
-"""Unified Qwen3-TTS CLI: preset voices, voice design, and voice cloning.
-
-Qwen3-TTS ships three separate checkpoints, one per capability, and this CLI
-exposes all three plus a reusable voice library:
+"""Qwen3-TTS command line: preset voices, voice design and voice cloning.
 
     preset   CustomVoice model  -- 9 built-in speakers (+ style instructions on 1.7B)
     design   VoiceDesign model  -- invent a voice from a written description
@@ -9,12 +6,10 @@ exposes all three plus a reusable voice library:
     voices   register/list/inspect/remove saved cloned voices
     info     list the speakers and languages the model actually supports
 
-Every subcommand takes either --text "one line" or --text-file script.txt
-(one generation per line; blank lines and #comments skipped, --join to
-concatenate the results into a single wav).
+Each takes --text "one line" or --text-file script.txt (one line per generation;
+--join writes a single wav).
 
 Examples:
-    # What can this thing actually say?
     python scripts/tts.py info
 
     # Preset speaker
@@ -175,8 +170,7 @@ def cmd_info(args: argparse.Namespace) -> int:
 
 
 def cmd_preset(args: argparse.Namespace) -> int:
-    # Read the script before loading: a model load is minutes on CPU, and a typo'd path or an
-    # empty --text should fail now, not after the wait.
+    # Read the script before the (slow) model load so bad input fails fast.
     lines, gaps = prepared_script(args)
     warn_if_instruct_ignored("CustomVoice", args, args.instruct)
     model = load_model("CustomVoice", args)
@@ -196,8 +190,7 @@ def cmd_preset(args: argparse.Namespace) -> int:
 
 
 def cmd_design(args: argparse.Namespace) -> int:
-    # --model-size is restricted to 1.7B at the parser level (see build_parser), so there's
-    # nothing to override here -- argparse rejects 0.6B with a real message.
+    # argparse already limits --model-size to 1.7B here.
     lines, gaps = prepared_script(args)
     model = load_model("VoiceDesign", args)
     apply_seed(args)
@@ -220,8 +213,7 @@ def cmd_clone(args: argparse.Namespace) -> int:
     if args.voice and args.ref_audio:
         raise SystemExit("Pass --voice or --ref-audio, not both.")
     if args.voice and (args.ref_text or args.x_vector_only):
-        # A saved voice already baked in its transcript and mode; accepting these would
-        # look like they applied when they don't.
+        # A saved voice has its transcript and mode baked in.
         raise SystemExit(
             "--ref-text/--x-vector-only don't apply to --voice: a saved voice already has them "
             "baked in. Re-register it with `voices add --force` to change them."
@@ -242,8 +234,7 @@ def cmd_clone(args: argparse.Namespace) -> int:
         hint = f" Known voices: {', '.join(known)}" if known else " No voices saved yet."
         raise SystemExit(f"No saved voice named '{args.voice}'.{hint}")
 
-    # Everything above is checked before the load: it's minutes on CPU, so bad input should
-    # fail immediately rather than after the wait.
+    # All input is checked above, before the slow load.
     lines, gaps = prepared_script(args)
 
     model = load_model("Base", args)
@@ -252,8 +243,7 @@ def cmd_clone(args: argparse.Namespace) -> int:
     if args.voice:
         prompt = load_voice(args.voice, expect_model_size=args.model_size)
     else:
-        # Ad-hoc reference clip: encode it once and cache the result, so repeat
-        # takes of the same clip skip the (slow, identical) encoding step.
+        # Ad-hoc clip: encoded once and cached.
         prompt, _ = encode_prompt(
             model,
             args.ref_audio,

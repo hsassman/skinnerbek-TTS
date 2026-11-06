@@ -1,9 +1,4 @@
-"""Shared helpers for the Qwen3-TTS scripts in this project.
-
-This machine has an AMD GPU (no CUDA, no Windows ROCm support), so every
-script defaults to CPU inference. If you later run this on a CUDA-capable
-box, pass --device cuda:0 to any script to use the GPU path instead.
-"""
+"""Shared helpers for the Qwen3-TTS scripts. CPU by default; --device cuda:0 for a GPU."""
 import argparse
 import gc
 import os
@@ -32,9 +27,7 @@ def add_model_args(
     parser: argparse.ArgumentParser,
     kind: Optional[str] = None,
 ) -> argparse.ArgumentParser:
-    """Model/device flags. `kind` restricts --model-size to the sizes actually published,
-    so `design --model-size 0.6B` is rejected by argparse instead of being silently
-    overridden to 1.7B."""
+    """Model/device flags. `kind` limits --model-size to the sizes published for it."""
     sizes = MODEL_SIZES[kind] if kind else ["0.6B", "1.7B"]
     default = sizes[0]
     size_help = (
@@ -83,11 +76,8 @@ def add_model_args(
 
 
 def validate_ref_audio(ref: str) -> None:
-    """Reference audio may be a local path, an http(s) URL, or a base64 blob.
-
-    Only local paths can be checked up front -- do that, so a typo fails immediately with a
-    clear message instead of surfacing from inside the tokenizer minutes into a model load.
-    """
+    """Reference audio is a local path, an http(s) URL or base64. Check local paths now,
+    so a typo fails before a slow model load."""
     if ref.startswith(("http://", "https://", "data:audio")):
         return
     if len(ref) > 256 and "/" not in ref and "\\" not in ref:
@@ -97,15 +87,10 @@ def validate_ref_audio(ref: str) -> None:
 
 
 def configure_hf(args: argparse.Namespace) -> None:
-    """Set up huggingface_hub before it gets imported. Call before importing qwen_tts.
+    """Configure huggingface_hub; call before importing qwen_tts.
 
-    Two Windows/network problems are worth heading off here:
-
-    1. Symlinks. The hub cache symlinks blobs into snapshot dirs, but Windows only permits
-       that under Developer Mode or as admin -- otherwise `os.symlink` raises WinError 1314
-       and kills the download mid-way. Copying instead costs some disk and always works.
-    2. Offline. Every load revalidates each file against the Hub; on a slow network each
-       check burns 5 retries with backoff, turning a cached load into many minutes.
+    Copies instead of symlinking (Windows refuses symlinks without Developer Mode,
+    WinError 1314). With --offline, skips the per-file Hub revalidation.
     """
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
     os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
@@ -120,17 +105,10 @@ def configure_hf(args: argparse.Namespace) -> None:
 
 
 def _stub_mistral_check() -> None:
-    """Stop transformers from phoning home about Mistral regexes while loading our tokenizer.
+    """Answer transformers' Mistral-tag check for Qwen3-TTS repos without the network.
 
-    qwen_tts calls AutoProcessor.from_pretrained(..., fix_mistral_regex=True), which sends
-    transformers into `is_base_mistral()` -> `huggingface_hub.model_info()`. That call is
-    unguarded: no cache, no offline branch, no try/except, so it hard-fails offline and
-    stalls on a flaky network. It checks for a `base_model:.*mistralai` tag, which a Qwen
-    repo can never have, so the answer is always False -- we just return that without asking
-    the Hub. Scoped to Qwen3-TTS repos so any other model_info call behaves normally.
-
-    transformers does `from huggingface_hub import model_info` inside the function body, so
-    it resolves the attribute at call time and picks this up.
+    fix_mistral_regex=True makes transformers call huggingface_hub.model_info(), which
+    fails offline. A Qwen repo never has the Mistral tag, so return no tags for those.
     """
     from types import SimpleNamespace
 
@@ -146,10 +124,8 @@ def _stub_mistral_check() -> None:
     huggingface_hub.model_info = model_info
 
 
-# Named delivery presets. "natural" = the model's own generate_config (change
-# nothing). "steady" pulls temperature down and adds a little repetition penalty:
-# on the 0.6B model that noticeably reduces the rushed, occasionally stammering
-# delivery. "expressive" opens it back up. Explicit --temperature etc. always win.
+# Delivery presets. "natural" keeps the model's defaults; "steady" calms the 0.6B
+# model's rushed delivery. Explicit --temperature etc. win.
 DELIVERY_PRESETS: Dict[str, Dict[str, float]] = {
     "steady": {"temperature": 0.7, "repetition_penalty": 1.1},
     "natural": {},
@@ -212,29 +188,19 @@ PARAM_COUNTS = {"0.6B": 0.75e9, "1.7B": 1.92e9}
 
 DTYPES = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}
 
-# Below this much free RAM, 0.6B float32 (~3GB of weights) thrashes swap on this box
-# -- a generation still finishes but takes 15-20 min. Drop to bfloat16 automatically.
+# Below this much free RAM, 0.6B float32 (~3 GB) swaps heavily; use bfloat16 instead.
 LOW_MEMORY_GB = 4.0
 
-# ...but only where bfloat16 is actually cheap. See cpu_bf16_is_native().
-#
-# Where bf16 is emulated the trade is so lopsided that float32 wins even when it
-# does NOT fit. Measured on the i5-7200U with 1.7GB free -- float32 paging hard
-# against a 3GB weight set -- one 33-character line took 72s in float32 versus
-# 510s in bfloat16 (7.1x), because emulated bf16 costs more than the page faults
-# do. So only fall back when float32 would leave essentially nothing to run in.
+# Without hardware bf16, float32 wins even while swapping (72 s vs 510 s per line
+# measured on an i5-7200U), so only fall back when almost no RAM is left.
 LOW_MEMORY_GB_EMULATED_BF16 = 1.5
 
 
 def cpu_bf16_is_native() -> bool:
     """True when this CPU does bfloat16 in hardware (AVX512-BF16 or AMX).
 
-    This matters enormously and is not obvious. torch has no bf16 kernels for a
-    pre-AVX512 x86 CPU, so it emulates: measured on the i5-7200U (Kaby Lake,
-    AVX2) in this project, bfloat16 is **25x slower than float32 for a decode
-    matvec and 265x slower for a prefill matmul**. Halving the weights to save
-    RAM is a straight win on a Xeon with AMX and a catastrophe here, so the dtype
-    policy has to ask the CPU first rather than assume smaller is faster.
+    Without it torch emulates bf16: 25x slower than float32 per decode step on an
+    i5-7200U. So the dtype policy asks the CPU before choosing the smaller type.
     """
     if not hasattr(torch, "cpu"):
         return False
@@ -262,11 +228,7 @@ def free_gb() -> Optional[float]:
 
 
 def auto_low_memory() -> bool:
-    """True when free RAM is tight enough that 0.6B should load as bfloat16.
-
-    On a CPU without native bf16 this is a last resort that trades ~25x speed for
-    half the RAM, not an optimisation -- load_model says so out loud when it fires.
-    """
+    """True when free RAM is tight enough that 0.6B should load as bfloat16."""
     avail = free_gb()
     return False if avail is None else avail < low_memory_threshold_gb()
 
@@ -277,15 +239,10 @@ def resolve_dtype(
     requested: str = "auto",
     low_memory: bool = False,
 ) -> torch.dtype:
-    """Pick a dtype that actually fits.
+    """Pick a dtype that fits.
 
-    The checkpoints are stored in bfloat16. Loading as float32 upcasts them and doubles the
-    resident size: the 1.7B models become ~7.7GB of weights, which this 8GB box cannot hold --
-    it segfaults partway through loading. So float32 (faster, better-supported CPU kernels) is
-    only the default for 0.6B; 1.7B falls back to bfloat16, matching how it's stored.
-    `low_memory` also drops 0.6B to bfloat16 -- half the RAM. Note that "a little slower per
-    step" only holds where the CPU has hardware bf16; where it doesn't, torch emulates and the
-    same switch costs ~25x. See cpu_bf16_is_native() and auto_low_memory().
+    float32 for 0.6B (faster on CPU). 1.7B stays bfloat16: as float32 it needs ~7.7 GB
+    and crashes an 8 GB machine. `low_memory` also drops 0.6B to bfloat16.
     """
     if requested != "auto":
         return DTYPES[requested]
@@ -363,8 +320,7 @@ def load_model(kind: str, args: argparse.Namespace):
 
     repo = model_id(kind, args.model_size)
     if getattr(args, "offline", False):
-        # Offline, a missing checkpoint surfaces as transformers' "couldn't connect to
-        # huggingface.co", which tells nobody what to do. Say which model and how.
+        # Name the missing model instead of transformers' "couldn't connect" error.
         from huggingface_hub import try_to_load_from_cache
 
         if not isinstance(try_to_load_from_cache(repo, "config.json"), str):
@@ -379,10 +335,7 @@ def load_model(kind: str, args: argparse.Namespace):
         f"({threads} torch thread(s); first run downloads weights)...",
         file=sys.stderr,
     )
-    # transformers >= ~4.50 always streams weights straight into place (the old
-    # low_cpu_mem_usage knob is now a no-op), so there's nothing to tune at load
-    # time here. The RAM lever on this box is generating one line at a time --
-    # see common.synth / --chunk-size.
+    # RAM is controlled at generation time (one line per call, see synth).
     return Qwen3TTSModel.from_pretrained(
         repo,
         device_map=args.device,
@@ -391,12 +344,7 @@ def load_model(kind: str, args: argparse.Namespace):
 
 
 def warn_if_instruct_ignored(kind: str, args: argparse.Namespace, instruct: Optional[str]) -> None:
-    """The 0.6B CustomVoice model silently drops `instruct`.
-
-    qwen_tts's generate_custom_voice does `if self.model.tts_model_size in "0b6": instruct = None`,
-    so style instructions on the 0.6B checkpoint are discarded with no error. Say so out loud
-    rather than letting the user think the instruction had an effect.
-    """
+    """Warn that the 0.6B CustomVoice model silently ignores `instruct`."""
     if kind == "CustomVoice" and args.model_size == "0.6B" and instruct:
         print(
             "WARNING: --instruct is ignored by the 0.6B CustomVoice model (the library drops it "
@@ -415,11 +363,7 @@ def read_script(
     sentence_gap_ms: int = 300,
     paragraph_gap_ms: int = 650,
 ) -> "tuple[List[str], List[int]]":
-    """Read + prepare a script: (lines_to_speak, gap_before_each_line_ms).
-
-    Wraps textprep.prepare_script and turns its ValueError into a CLI-friendly
-    SystemExit. `normalize=False` falls back to plain line splitting.
-    """
+    """(lines_to_speak, gap_before_each_line_ms) for a script; errors become SystemExit."""
     if text is not None:
         src = text
     else:
@@ -440,9 +384,7 @@ def read_script(
         raise SystemExit(str(e))
 
 
-# --- The one place each capability is actually invoked -------------------------
-# The CLI subcommands and the GUI callbacks both call these, so "the GUI does
-# exactly what the CLI does" is true by construction rather than by review.
+# --- The one place each capability is invoked (CLI and app share these) ------
 
 def run_preset(model, lines: List[str], *, language: str, speaker: str,
                instruct: Optional[str], sampling: Dict[str, Any]):
@@ -485,9 +427,8 @@ def run_clone(model, lines: List[str], *, language: str, voice_clone_prompt=None
     )
 
 
-# Bound generation by text length: the library's 4096-frame default permits
-# about 5.7 minutes of audio per line. These conservative limits leave headroom
-# for slow speech; --max-new-tokens overrides them.
+# Cap frames per line by text length (the library default allows ~5.7 min a line).
+# --max-new-tokens overrides.
 CODEC_HZ = 12.0
 CHARS_PER_SECOND = 8.0
 TOKEN_HEADROOM = 3.0
@@ -502,12 +443,7 @@ def token_budget(text: str) -> int:
 
 
 def configure_threads(threads: Optional[int] = None) -> int:
-    """Set torch's intra-op thread count, returning what's in effect.
-
-    torch defaults to the *physical* core count, which is usually right; this
-    exists so a machine that reports the wrong topology (or a run sharing the box
-    with the Gradio server) can be pinned explicitly with --threads.
-    """
+    """Set torch's intra-op threads (--threads) and return the count in effect."""
     if threads and threads > 0:
         torch.set_num_threads(int(threads))
     return torch.get_num_threads()
@@ -516,13 +452,7 @@ def configure_threads(threads: Optional[int] = None) -> int:
 # --- machine facts and a speed estimate ---------------------------------------
 
 def system_report() -> Dict[str, Any]:
-    """Everything that decides how fast a generation will be, in one dict.
-
-    Exists because the single worst performance trap on this project was
-    invisible: a CPU without hardware bfloat16 silently taking a ~25x slower
-    path. Surfacing `bf16_native` and the resolved dtype turns that into
-    something you can see before you wait an hour for it.
-    """
+    """Everything that decides generation speed (dtype, bf16 support, threads, RAM)."""
     import platform
 
     cores = threads = None
@@ -567,15 +497,8 @@ def _total_gb() -> Optional[float]:
         return None
 
 
-# Measured generation speed, so the UI can estimate before you commit to a run.
-# Keyed by dtype because that is the factor that moves it by an order of
-# magnitude on this hardware. Kept in .cache (derived data, gitignored).
-#
-# The estimate is the MEDIAN of the last SPEED_WINDOW samples, not a running
-# average. An average is permanently skewed by a handful of outliers -- a line
-# generated against a stubbed model, a run that thrashed swap, a machine change
-# -- and there is no way for it to recover. A median of a bounded window shrugs
-# those off and re-converges once real samples outnumber them.
+# Measured speed per dtype, for time estimates. Median of the last SPEED_WINDOW
+# samples, so outliers don't skew it for good. Stored in .cache (gitignored).
 SPEED_PATH = REPO_ROOT / ".cache" / "speed.json"
 SPEED_WINDOW = 15
 
@@ -610,11 +533,7 @@ def _dtype_key() -> str:
 
 
 def record_speed(seconds: float, frames: float, dtype_name: Optional[str] = None) -> None:
-    """Fold one finished line into the rolling seconds-per-frame samples.
-
-    Silently does nothing on any error -- a stats file is never worth failing a
-    generation the user just waited minutes for.
-    """
+    """Add one line's seconds-per-frame sample. Never raises."""
     import json
 
     try:
@@ -664,12 +583,7 @@ def speed_sample_count(dtype_name: Optional[str] = None) -> int:
 
 
 def estimate_seconds(text_lines: List[str]) -> Optional[float]:
-    """Rough wall-clock estimate for generating `text_lines`, or None if unknown.
-
-    Uses the same characters-per-second model as token_budget, but without its
-    safety headroom -- that headroom exists to catch runaways, and applying it
-    here would triple every estimate.
-    """
+    """Rough seconds to generate `text_lines`, or None before any measurement."""
     spf = seconds_per_frame()
     if not spf:
         return None
@@ -701,21 +615,12 @@ def synth(
 ):
     """Generate lines in chunks; return (waveforms, sample_rate).
 
-    qwen_tts batches every text in one call, which on an 8 GB box builds a KV
-    cache and holds every waveform at once -- multiple GB that pages to disk. So
-    chunk_size=1 (the default) generates one line per call with gc.collect()
-    between chunks, keeping peak RAM at a single line. chunk_size=0, or any value
-    >= len(lines), batches everything (faster on a big machine). Changing the
-    chunk size changes seeded output. Each call gets a text-based token budget
-    unless sampling explicitly sets max_new_tokens.
-
-    on_line(index, waveform, sample_rate) runs for each completed line, then
-    on_progress(done, total) runs per chunk. should_cancel is polled between
-    chunks and raises Cancelled; on_line can preserve completed audio on disk.
+    chunk_size=1 (default) keeps peak RAM at one line; 0 batches everything.
+    on_line(i, wav, sr) runs per line, on_progress(done, total) per chunk, and
+    should_cancel() is checked before each chunk (raises Cancelled).
     """
     total = len(lines)
-    # max(1, ...) only matters for an empty `lines`: step would be 0 and
-    # range() rejects a zero stride. Non-empty inputs are unaffected.
+    # max(1, ...) keeps range() valid for empty `lines`.
     step = max(1, total if not chunk_size or chunk_size < 1 else int(chunk_size))
     wavs: List = []
     sr = None
@@ -723,14 +628,11 @@ def synth(
         raise ValueError(f"unknown capability {capability!r}")
 
     for start in range(0, total, step):
-        # Checked between chunks only, never mid-generation: stopping a line
-        # half-way would leave a truncated waveform. At the default chunk_size
-        # of 1 that is a cancellation point before every line.
+        # Between chunks only, so no line is cut off half-way.
         if should_cancel is not None and should_cancel():
             raise Cancelled(f"stopped after {len(wavs)} of {total} line(s)")
         batch = lines[start:start + step]
-        # Bound each call by the longest line in it (see token_budget), unless the
-        # caller set an explicit ceiling.
+        # Budget by the longest line in the chunk unless the caller set a ceiling.
         call = dict(sampling)
         call.setdefault("max_new_tokens", token_budget(max(batch, key=len)))
 
@@ -757,13 +659,7 @@ def synth(
 
 
 def peak_limit(wavs, peak: float):
-    """Scale the whole batch by one gain so nothing clips.
-
-    The model occasionally generates samples at or past full scale -- long reads have been
-    observed flat-topping for a few samples. Attenuate (never boost), and use a single gain
-    across every line rather than per-line: normalising each line separately would give each
-    sentence a different level and make a joined paragraph pump.
-    """
+    """Attenuate the whole batch by one gain so nothing clips (one gain keeps lines level)."""
     import numpy as np
 
     if not peak:
@@ -780,12 +676,10 @@ DEFAULT_LUFS = -16.0
 
 def loudness_normalize(wavs, sample_rate: int, target_lufs: float = DEFAULT_LUFS,
                        peak: float = 0.97):
-    """Bring the whole batch to `target_lufs` with one gain, then peak-limit as a safety net.
+    """Bring the batch to `target_lufs` with one gain, then peak-limit.
 
-    One gain across all lines (measured on the concatenation) so relative levels between
-    sentences are preserved -- same reasoning as peak_limit. Falls back to peak_limit alone
-    when `target_lufs` is 0/None, when pyloudnorm isn't installed, or when the signal is too
-    short/quiet to measure (ITU-R BS.1770 needs ~400ms).
+    Falls back to peak_limit alone when the target is 0/None, pyloudnorm is missing,
+    or the audio is too short to measure (~400 ms).
     """
     import numpy as np
 
@@ -823,16 +717,8 @@ def write_wavs(
 ) -> List[Path]:
     """Write generated audio.
 
-    Single wav -> `out` as given. Multiple wavs -> `out` gets a _001, _002 ... suffix,
-    unless --join, in which case they're concatenated into `out` with a short gap.
-
-    `gaps`, when given, is a per-line silence in ms placed *before* each line
-    (gaps[0] is ignored); it lets a joined read use a longer pause between
-    paragraphs than between sentences. Falls back to a uniform `gap_ms`.
-
-    `lufs` is the integrated-loudness target every take is brought to (one gain
-    across all lines) before the peak-limit safety net; pass 0/None for the old
-    peak-only behaviour.
+    One wav goes to `out`; several get _001, _002... suffixes, or one file with `join`.
+    `gaps` is silence (ms) before each line; `lufs` is the loudness target (0 = peak only).
     """
     import numpy as np
     import soundfile as sf
@@ -841,8 +727,7 @@ def write_wavs(
 
     out_path = Path(out)
     if not out_path.suffix:
-        # soundfile infers the container from the extension; without one it raises deep in
-        # libsndfile, and the numbered path would produce files like `read_001` with no type.
+        # soundfile needs an extension to pick the container.
         out_path = out_path.with_suffix(".wav")
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -870,12 +755,7 @@ def write_wavs(
 
 
 def write_raw_parts(wavs, sample_rate: int, out_dir: str, prefix: str) -> List[Path]:
-    """Write each line as its own wav, with NO loudness/peak processing.
-
-    These are the raw per-line takes kept so a single line can be regenerated and
-    the read re-stitched without re-running the rest. Levelling happens later, in
-    `stitch`, across the whole set.
-    """
+    """Write each line as its own unprocessed wav, so one line can be redone and re-stitched."""
     import numpy as np
     import soundfile as sf
 
@@ -906,8 +786,7 @@ def stitch(
         a, rate = sf.read(p, dtype="float32")
         if sample_rate is not None and rate != sample_rate:
             raise ValueError("Cannot stitch audio parts with different sample rates")
-        # Parts are mono model output, and the join pads with 1-D silence, so a
-        # multichannel part could never be joined: refuse it up front.
+        # Parts are mono; a multichannel file can't be joined.
         if a.ndim != 1:
             raise ValueError("Cannot stitch multichannel audio parts; parts must be mono")
         sample_rate = rate

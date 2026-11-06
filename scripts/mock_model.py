@@ -1,10 +1,4 @@
-"""A stand-in for Qwen3TTSModel, for working on the app without loading a model.
-
-`python scripts/app.py --mock` swaps every model load for this. Each line comes
-back as a short, audible tone pattern after a delay proportional to its length,
-so progress, cancel, stitching, sessions, "Fix one line" and the voice library
-can all be exercised in seconds on any machine. Nothing it produces is speech.
-"""
+"""Stand-in model for `app.py --mock`: returns tones after a short delay, no speech."""
 import time
 from typing import List
 

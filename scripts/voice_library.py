@@ -1,13 +1,7 @@
-"""A named library of cloned voices, stored under `voices/`.
+"""Saved cloned voices in voices/<name>.pt.
 
-Encoding a reference clip (speech-tokenizing it + extracting a speaker embedding)
-is the slow part of cloning on CPU, and it's identical every time you reuse the
-same clip. This module does it once, saves the result as `voices/<name>.pt`, and
-lets you refer to the voice by name forever after.
-
-The on-disk format matches the one used by qwen_tts's own Gradio demo
-(`{"items": [asdict(VoiceClonePromptItem), ...]}`), so voices saved here load in
-the UI and vice versa.
+Encoding a clip is the slow part of cloning, so it's done once and saved. The
+format matches qwen_tts's own demo, so voices work in both.
 """
 import json
 import os
@@ -30,8 +24,7 @@ class InvalidVoiceName(ValueError):
     """A name the library can't safely turn into a file name."""
 
 
-# Windows device names, reserved in every folder and with any extension
-# ("nul.pt", "com¹.pt", "nul .x"). Saving to one silently writes to the device.
+# Windows device names, reserved with any extension ("nul.pt", "com¹.pt", "nul .x"). Saving to one silently writes to the device.
 _RESERVED = re.compile(r"^(con|prn|aux|nul|conin\$|conout\$|(com|lpt)[0-9¹²³])$", re.I)
 
 
@@ -51,8 +44,7 @@ def _validate_name(name: str) -> None:
         raise InvalidVoiceName("Voice name contains invalid filename characters")
     if name.endswith((".", " ")):
         raise InvalidVoiceName("Voice name cannot end with a dot or space")
-    # Only Windows maps these to devices, so a voice called "aux" made on
-    # Linux stays listable, loadable and removable there.
+    # Device names only matter on Windows.
     if _WINDOWS and _RESERVED.match(name.split(".")[0].rstrip(" ")):
         raise InvalidVoiceName(f"'{name}' is a reserved name on Windows; pick another")
 
@@ -131,9 +123,8 @@ def save_voice(
     voices_dir: Path = VOICES_DIR,
     profile: Optional[dict] = None,
 ) -> Path:
-    """Persist the prompt items from `model.create_voice_clone_prompt` under `name`.
-    `profile` is the speaker's delivery read (transcribe.VoiceProfile.to_dict()),
-    used to set sensible defaults whenever the voice is picked."""
+    """Save `model.create_voice_clone_prompt` items under `name`, with an optional
+    delivery profile used for Speak's defaults."""
     voices_dir = Path(voices_dir)
     voices_dir.mkdir(parents=True, exist_ok=True)
 
@@ -145,8 +136,7 @@ def save_voice(
             "ref_audio": str(ref_audio),
             "ref_text": items[0].ref_text,
             "x_vector_only_mode": bool(items[0].x_vector_only_mode),
-            # The speaker embedding is extracted by the Base model, so a voice is tied to
-            # the size that made it -- see the mismatch warning in load_voice.
+            # A voice is tied to the model size that made it (see load_voice).
             "model_size": model_size,
             "created": time.strftime("%Y-%m-%d %H:%M"),
             **({"profile": profile} if profile else {}),

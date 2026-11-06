@@ -1,38 +1,20 @@
-"""Skinnerbek Studio: one web app for every Qwen3-TTS capability on this machine.
+"""Skinnerbek Studio: the web app.
 
-`launch_ui.py` runs the demo that ships with `qwen_tts`: one capability per
-process, a bilingual UI, no notion of a script or a saved-voice library. This
-app is the friendlier front door:
-
-    * Clone       -- the front door: drop in a clip or record yourself, get an
-                     automatic transcript and a read of how you speak, save the
-                     voice and hear it say anything, all on one screen.
-    * Speak       -- pick a voice, type a script, watch it render line by line,
-                     redo any line you don't like.
-    * My voices   -- every cloned voice: audition, use, delete.
-    * Design      -- invent a voice from a written description (VoiceDesign).
-    * Recordings  -- play back and download anything generated earlier.
-    * Settings    -- machine report, pronunciation lexicon, housekeeping.
-
-Every generation runs through the *same* helpers the command line uses
-(`common.synth` over `run_preset` / `run_design` / `run_clone`, then
-`write_wavs` / `stitch`), so a result from this app matches the equivalent
-`tts.py` command at the same `--chunk-size`.
+Tabs: Clone, Speak, My voices, Design, Recordings, Settings. Generation uses the
+same helpers as the CLI (common.synth, stitch), so results match `tts.py`.
 
     python scripts/app.py                # http://127.0.0.1:7860
-    python scripts/app.py --offline      # skip Hugging Face network checks
-    python scripts/app.py --port 8000 --share
-    python scripts/app.py --mock         # fast stand-in model, for UI work
+    python scripts/app.py --offline      # no Hugging Face network checks
+    python scripts/app.py --mock         # stand-in model, for UI work
 
-Styles and browser code live in ui/ (studio.css, studio.js, recorder.js).
-
-One model fits in RAM at a time on an 8 GB box, so switching voice type or model
-size swaps the loaded model. The first generation of each kind loads the
-checkpoint -- minutes on CPU. Later ones reuse it.
+Styles and browser code live in ui/. One model is loaded at a time (8 GB RAM).
 """
 import argparse
 import gc
+import ipaddress
+import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -41,10 +23,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
-# Import qwen_tts lazily (it prints banners and is slow); std / local first.
+os.environ.setdefault("GRADIO_ANALYTICS_ENABLED", "False")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import gradio as gr  # noqa: E402
+from gradio.utils import get_upload_folder  # noqa: E402
+from starlette.middleware import Middleware  # noqa: E402
 import numpy as np  # noqa: E402
 import soundfile as sf  # noqa: E402
 
@@ -79,12 +63,7 @@ from voice_library import (  # noqa: E402
     voice_path,
 )
 
-# ---------------------------------------------------------------------------
-# Static facts about the built-in speakers. Names come straight from the
-# CustomVoice checkpoint config (talker_config.spk_id); the two dialect notes
-# come from talker_config.spk_is_dialect. No gender/language is asserted for the
-# others -- the Qwen3-TTS model card is the reference for those.
-# ---------------------------------------------------------------------------
+# Built-in speakers, from the CustomVoice config (talker_config.spk_id / spk_is_dialect).
 PRESET_SPEAKERS: List[Tuple[str, str]] = [
     ("ryan", "Ryan"),
     ("aiden", "Aiden"),
@@ -109,23 +88,41 @@ CFG = SimpleNamespace(device="cpu", offline=False, low_memory=False, chunk_size=
 
 # One loaded model at a time (8 GB box). Keyed by (kind, size, dtype_name).
 _CACHE: dict = {}
+# Gradio runs each event listener in its own worker, so model use is serialised here.
+_MODEL_LOCK = threading.RLock()
 
-# Cancellation. Generation is strictly serial here -- only one model fits in RAM
-# -- so a single process-wide flag is the whole story, and it saves the Cancel
-# button from needing per-session plumbing.
-_CANCEL = threading.Event()
+# One stop flag per running generation; Stop sets them all.
+_RUNS: set = set()
+_RUNS_LOCK = threading.Lock()
+
+MAX_SCRIPT_CHARS = 20_000
+MAX_UPLOAD = "50mb"
 
 
-# ---------------------------------------------------------------------------
-# Design system. The stylesheet and the browser-side behaviour live in ui/ as
-# real .css/.js files so they can be read, linted and diffed like any other code.
-# ---------------------------------------------------------------------------
+def _new_run() -> threading.Event:
+    ev = threading.Event()
+    with _RUNS_LOCK:
+        _RUNS.add(ev)
+    return ev
+
+
+def _end_run(ev: threading.Event) -> None:
+    with _RUNS_LOCK:
+        _RUNS.discard(ev)
+
+
+def _safe_prefix(prefix: str) -> str:
+    """File-name prefix with anything but letters, digits, '_', '-' and '.' replaced."""
+    clean = re.sub(r"[^\w.-]", "_", str(prefix or "take")).strip(".")[:80]
+    return clean.replace("..", "_") or "take"
+
+
+# --- Design system (files in ui/) -------------------------------------------
 UI_DIR = Path(__file__).resolve().parent / "ui"
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 CSS = (UI_DIR / "studio.css").read_text(encoding="utf-8")
 STUDIO_JS = (UI_DIR / "studio.js").read_text(encoding="utf-8")
-# driver.js 1.8.0 (MIT, github.com/nilbuild/driver.js), vendored so the guided
-# tour works offline like the rest of the app.
+# driver.js 1.8.0 (MIT), vendored so the guided tour works offline.
 DRIVER_JS = (UI_DIR / "vendor" / "driver.js.iife.js").read_text(encoding="utf-8")
 DRIVER_CSS = (UI_DIR / "vendor" / "driver.css").read_text(encoding="utf-8")
 RECORDER_JS = (UI_DIR / "recorder.js").read_text(encoding="utf-8")
@@ -161,9 +158,7 @@ def _icon(name: str) -> str:
             f'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{_ICON_PATHS[name]}</svg>')
 
 
-# The mark: a speech bubble whose top edge is Table Mountain, sound bars inside.
-# Drawn as SVG (not the generated bitmap) so it is crisp at every size and its
-# bars can animate. assets/favicon.svg is the static copy of the same shape.
+# The mark: a speech bubble shaped like Table Mountain. assets/favicon.svg is a static copy.
 LOGO_SVG = (
     '<svg viewBox="0 0 64 64" aria-hidden="true" focusable="false">'
     '<defs><linearGradient id="tts-logo-g" x1="0" y1="1" x2="1" y2="0">'
@@ -220,9 +215,7 @@ def _asset_uri(stem: str) -> Optional[str]:
 
 
 def _hero_css() -> str:
-    """The generated banner (assets/banner.*) becomes the masthead's own
-    background, so it fills the header edge to edge and is clipped by its
-    rounded corners instead of floating as a box inside it."""
+    """Use assets/banner.* as the masthead background."""
     dark, light = _asset_uri("banner"), _asset_uri("banner-light")
     css = ""
     if dark:
@@ -253,19 +246,18 @@ def _hero_art() -> str:
     )
 
 
-# ---------------------------------------------------------------------------
-# Model loading
-# ---------------------------------------------------------------------------
+# --- Model loading -------------------------------------------------------------
 def _low_memory() -> bool:
     return bool(CFG.low_memory) or auto_low_memory()
 
 
 def get_model(kind: str, size: str):
-    """Return a loaded Qwen3TTSModel, reusing the cached one when possible.
+    """The loaded model for (kind, size), evicting any other first (two don't fit in 8 GB)."""
+    with _MODEL_LOCK:
+        return _get_model(kind, size)
 
-    Swapping kind or size evicts the previous model first -- loading a second
-    one alongside it would blow the RAM budget on this machine.
-    """
+
+def _get_model(kind: str, size: str):
     dtype = resolve_dtype(CFG.device, size, CFG.dtype, low_memory=_low_memory())
     key = (kind, size, str(dtype))
     if key in _CACHE:
@@ -291,21 +283,13 @@ def get_model(kind: str, size: str):
         low_memory=CFG.low_memory,
         threads=CFG.threads,
     )
-    # load_model runs the RAM preflight (common.check_memory), which raises
-    # SystemExit when a load physically can't fit -- callers catch that too.
+    # Raises SystemExit if it can't fit in RAM; callers catch that.
     model = load_model(kind, args)
     _CACHE[key] = model
     return model
 
 
-# ---------------------------------------------------------------------------
-# The machine report
-#
-# This exists because the worst performance trap in this project was invisible:
-# a CPU with no hardware bfloat16 silently taking a ~25x slower path. Putting
-# the dtype, the bf16 capability and the measured speed on screen turns an
-# hour-long mystery into something you can read before you commit to a run.
-# ---------------------------------------------------------------------------
+# --- Machine report: dtype, bf16 support and measured speed ------------------
 def _stat(label: str, value: str, tone: str = "") -> str:
     """One machine-report card: a small label over its value. Tone is also
     spelt out in the value text (e.g. "slow here"), never colour alone."""
@@ -388,9 +372,7 @@ def _system_html() -> str:
     return html
 
 
-# ---------------------------------------------------------------------------
-# Text prep / output helpers
-# ---------------------------------------------------------------------------
+# --- Text prep / output helpers ---------------------------------------------
 def _lang(display: str) -> str:
     """The bundled demo passes languages to the model lowercased, with 'Auto'
     left alone. Match that so a picked language behaves the same here."""
@@ -398,9 +380,7 @@ def _lang(display: str) -> str:
 
 
 def _seeded(seed):
-    """Seed torch for a repeatable take. 0 / blank means a fresh take: Gradio 6
-    turns an empty number box into 0, so 0 can't double as a real seed --
-    otherwise every take, and every "Fix one line" retry, would be identical."""
+    """Seed torch for a repeatable take. 0 means random (Gradio sends 0 for an empty box)."""
     if seed is None or seed == "" or int(seed) == 0:
         import torch
 
@@ -414,6 +394,9 @@ def _seeded(seed):
 def _prep(script, tidy, gap_ms, para_gap):
     """(lines, gaps) from the script box. `tidy` toggles the rewrite; the
     lexicon.txt pronunciation overrides are always applied."""
+    if len(script or "") > MAX_SCRIPT_CHARS:
+        raise ValueError(f"The script is {len(script):,} characters. The limit is "
+                         f"{MAX_SCRIPT_CHARS:,}; split it into parts.")
     return prepare_script(
         script,
         normalize=bool(tidy),
@@ -446,13 +429,7 @@ def _fmt_dur(seconds: Optional[float]) -> str:
     return f"{h}h {m:02d}m"
 
 
-# ---------------------------------------------------------------------------
-# Live render progress
-#
-# `synth` already reports each finished line through `on_line`, so the panel is
-# a pure view over data the generation loop was emitting anyway -- it adds no
-# work to the model path.
-# ---------------------------------------------------------------------------
+# --- Live render progress (a view over synth's on_line events) ---------------
 def _progress_html(lines: List[str], done: List[Dict[str, Any]], started: float,
                    state: str = "running", note: str = "") -> str:
     """state: running | done | cancelled | error."""
@@ -544,18 +521,12 @@ def _title(icon: str, title: str, sub: str = "") -> str:
             f"<div><h2>{escape(title)}</h2>{p}</div></div>")
 
 
-# ---------------------------------------------------------------------------
-# Generation
-# ---------------------------------------------------------------------------
-def _run_synth(kind: str, p: dict, lines: List[str], events: "queue.Queue", first_line: int = 0):
-    """Generate `lines`, pushing a dict onto `events` as each one lands.
-
-    Runs on a worker thread so the request handler can keep yielding progress
-    to the browser. Writes each finished line to output/parts/ immediately, so
-    a cancelled or crashed run still leaves usable audio behind.
-    """
+# --- Generation ----------------------------------------------------------------
+def _run_synth(kind: str, p: dict, lines: List[str], events: "queue.Queue",
+               cancel: threading.Event, first_line: int = 0):
+    """Generate `lines`, writing each to output/parts/ and reporting it on `events`."""
     capability = _CAPABILITY[kind]
-    prefix = p.get("prefix", capability)
+    prefix = _safe_prefix(p.get("prefix", capability))
     ts = time.strftime("%Y%m%d_%H%M%S")
     pdir = _parts_dir()
     part_paths: List[str] = []
@@ -570,40 +541,42 @@ def _run_synth(kind: str, p: dict, lines: List[str], events: "queue.Queue", firs
         sf.write(path, np.asarray(wav, dtype=np.float32), sr)
         part_paths.append(str(path))
         audio = len(wav) / float(sr or 24000)
-        # Feed the measured rate back so future runs can be estimated up front
-        # (never from the mock model, which would make every estimate absurd).
+        # Calibrates time estimates (not from the mock model).
         if not CFG.mock:
             record_speed(seconds, audio * 12.0)
         events.put({"i": i, "seconds": seconds, "audio": audio, "path": str(path)})
 
     events.put({"phase": "loading"})
-    if capability == "preset":
-        model = get_model("CustomVoice", p["size"])
-        kw = dict(speaker=p["speaker"], instruct=(p.get("instruct") or None))
-    elif capability == "clone":
-        model = get_model("Base", p["vsize"])
-        kw = dict(voice_clone_prompt=load_voice(p["ref"], expect_model_size=p["vsize"]))
-    else:  # design
-        model = get_model("VoiceDesign", "1.7B")
-        kw = dict(instruct=p["desc"])
+    with _MODEL_LOCK:
+        if cancel.is_set():
+            raise Cancelled("stopped before the first line")
+        if capability == "preset":
+            model = get_model("CustomVoice", p["size"])
+            kw = dict(speaker=p["speaker"], instruct=(p.get("instruct") or None))
+        elif capability == "clone":
+            model = get_model("Base", p["vsize"])
+            kw = dict(voice_clone_prompt=load_voice(p["ref"], expect_model_size=p["vsize"]))
+        else:  # design
+            model = get_model("VoiceDesign", "1.7B")
+            kw = dict(instruct=p["desc"])
 
-    events.put({"phase": "generating"})
-    clock["t"] = time.time()
-    wavs, sr = synth(
-        capability, model, lines,
-        language=_lang(p["language"]),
-        sampling=delivery_sampling(p["delivery"]),
-        chunk_size=CFG.chunk_size,
-        on_line=on_line,
-        should_cancel=_CANCEL.is_set,
-        **kw,
-    )
+        events.put({"phase": "generating"})
+        clock["t"] = time.time()
+        wavs, sr = synth(
+            capability, model, lines,
+            language=_lang(p["language"]),
+            sampling=delivery_sampling(p["delivery"]),
+            chunk_size=CFG.chunk_size,
+            on_line=on_line,
+            should_cancel=cancel.is_set,
+            **kw,
+        )
     return wavs, sr, part_paths
 
 
 def _finish(kind, params, lines, gaps, sr, part_paths):
     """Stitch a levelled join from the per-line parts and build the redo state."""
-    prefix = params.get("prefix", kind)
+    prefix = _safe_prefix(params.get("prefix", kind))
     joined = OUTPUT_DIR / f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}.wav"
     stitch(part_paths, str(joined), gaps=gaps, lufs=DEFAULT_LUFS)
 
@@ -669,22 +642,19 @@ def _stitch_done(kind, params, lines, gaps, done) -> Tuple[str, dict, Any]:
 
 
 def _stream(kind: str, params: dict, lines: List[str], gaps: List[int], seed, note: str = ""):
-    """Run one generation, yielding live progress to the browser as it goes.
-
-    The model call happens on a worker thread; this generator just drains the
-    event queue and re-renders. The generation path itself is untouched.
-    """
-    _CANCEL.clear()
+    """Run one generation on a worker thread, yielding live progress to the browser."""
     _seeded(seed)
+    cancel = _new_run()
     events: "queue.Queue" = queue.Queue()
     box: Dict[str, Any] = {}
 
     def worker():
         try:
-            box["result"] = _run_synth(kind, params, lines, events)
+            box["result"] = _run_synth(kind, params, lines, events, cancel)
         except BaseException as exc:  # noqa: BLE001 -- reported in the UI below
             box["error"] = exc
         finally:
+            _end_run(cancel)
             events.put(None)
 
     thread = threading.Thread(target=worker, daemon=True)
@@ -699,24 +669,29 @@ def _stream(kind: str, params: dict, lines: List[str], gaps: List[int], seed, no
                 else _progress_html(lines, done, started, "running"))
         return gr.update(), html, gr.update(), gr.update(), gr.update()
 
-    while True:
-        try:
-            evt = events.get(timeout=0.5)
-        except queue.Empty:
+    try:
+        while True:
+            try:
+                evt = events.get(timeout=0.5)
+            except queue.Empty:
+                yield frame()
+                continue
+            if evt is None:
+                break
+            if "phase" in evt:
+                phase = evt["phase"]
+            else:
+                done.append(evt)
             yield frame()
-            continue
-        if evt is None:
-            break
-        if "phase" in evt:
-            phase = evt["phase"]
-        else:
-            done.append(evt)
-        yield frame()
+    finally:
+        # Browser gone (tab closed, request cancelled): stop the worker too.
+        if thread.is_alive():
+            cancel.set()
 
     thread.join(timeout=2.0)
     err = box.get("error")
 
-    if isinstance(err, Cancelled) or (_CANCEL.is_set() and done):
+    if isinstance(err, Cancelled) or (cancel.is_set() and done):
         if not done:
             yield (gr.update(), _idle_html("Stopped", " Nothing finished rendering, so there is no audio to keep."),
                    '<div class="tts-note tts-note--warn">Stopped. Nothing was rendered.</div>',
@@ -749,9 +724,7 @@ def _stream(kind: str, params: dict, lines: List[str], gaps: List[int], seed, no
            state, redo)
 
 
-# ---------------------------------------------------------------------------
-# Handlers
-# ---------------------------------------------------------------------------
+# --- Handlers ------------------------------------------------------------------
 def voice_choices() -> List[Tuple[str, str]]:
     out = [(label, f"preset:{key}") for key, label in PRESET_SPEAKERS]
     saved = list_voices()
@@ -761,7 +734,9 @@ def voice_choices() -> List[Tuple[str, str]]:
 
 
 def do_cancel():
-    _CANCEL.set()
+    with _RUNS_LOCK:
+        for ev in _RUNS:
+            ev.set()
     return '<div class="tts-note tts-note--warn">Stopping after the current line…</div>'
 
 
@@ -796,6 +771,9 @@ def do_speak(voice_value, script, size, language, instruct, delivery, tidy, gap_
             return
         lines, gaps = _prep(script, tidy, gap_ms, para_gap)
         kind_tag, ref = voice_value.split(":", 1)
+        if kind_tag == "preset" and ref not in dict(PRESET_SPEAKERS):
+            yield _err("Pick a voice from the list.")
+            return
 
         if kind_tag == "preset":
             note = ""
@@ -844,15 +822,18 @@ def do_regen_line(state, which, seed):
         if not 0 <= idx < len(lines):
             return gr.update(), "That line isn't in the last take.", state
 
-        _CANCEL.clear()
         _seeded(seed)
         events: "queue.Queue" = queue.Queue()
-        _wavs, _sr, new_parts = _run_synth(state["kind"], state["params"], [lines[idx]], events,
-                                           first_line=idx)
+        cancel = _new_run()
+        try:
+            _wavs, _sr, new_parts = _run_synth(state["kind"], state["params"], [lines[idx]], events,
+                                               cancel, first_line=idx)
+        finally:
+            _end_run(cancel)
 
         parts = list(state["parts"])
         parts[idx] = new_parts[0]
-        joined = OUTPUT_DIR / f"{state['prefix']}_{time.strftime('%Y%m%d_%H%M%S')}.wav"
+        joined = OUTPUT_DIR / f"{_safe_prefix(state['prefix'])}_{time.strftime('%Y%m%d_%H%M%S')}.wav"
         stitch(parts, str(joined), gaps=state["gaps"], lufs=DEFAULT_LUFS)
 
         new_state = {**state, "parts": parts}
@@ -919,6 +900,18 @@ def _voices_gallery_html() -> str:
                           " Create one on the Clone a voice tab and it will appear here.")
     return ('<div class="tts-gallery">'
             + "".join(_voice_card_html(f"voice:{n}") for n in names) + "</div>")
+
+
+def _recorded_clip(path):
+    """The recorder's value, accepted only if it is a file it just uploaded."""
+    if not path:
+        return gr.update()
+    try:
+        p = Path(path).resolve()
+        root = Path(get_upload_folder()).resolve()
+    except (OSError, ValueError):
+        return gr.update()
+    return str(p) if p.is_file() and root in p.parents else gr.update()
 
 
 def _clip_report_html(path) -> str:
@@ -1000,16 +993,17 @@ def do_add_voice(name, ref_audio, ref_text, xvec_only, size, prof=None,
             return (_bad(f"<strong>That clip can't make a usable voice.</strong><br>{why}"), *keep)
 
         progress(0.2, desc="Loading the cloning model…")
-        model = get_model("Base", size)
-        progress(0.6, desc="Learning the voice…")
-        items = model.create_voice_clone_prompt(
-            ref_audio=str(clean),
-            ref_text=((ref_text or "").strip() or None),
-            x_vector_only_mode=bool(xvec_only),
-        )
+        with _MODEL_LOCK:
+            model = get_model("Base", size)
+            progress(0.6, desc="Learning the voice…")
+            items = model.create_voice_clone_prompt(
+                ref_audio=str(clean),
+                ref_text=((ref_text or "").strip() or None),
+                x_vector_only_mode=bool(xvec_only),
+            )
         save_voice(name, items, ref_audio=str(clean), model_size=size,
                    profile=_strip_contour(prof))
-        gr.Info(f"Saved the voice '{name}'.")
+        gr.Info(f"Saved the voice '{escape(name)}'.")
         names = list_voices()
         return (f'<div class="tts-note tts-note--ok"><strong>{escape(name)} is ready.</strong> '
                 "Type something under <strong>Hear your new voice</strong> to try it. "
@@ -1029,18 +1023,9 @@ def do_add_voice(name, ref_audio, ref_text, xvec_only, size, prof=None,
                      f"name.<br><small>Details: {escape(str(e))}</small>"), *keep)
 
 
-# ---------------------------------------------------------------------------
-# Automatic transcript and voice read (Clone tab)
-#
-# A clone is only as good as its transcript, and typing one word-for-word is
-# where people give up. So the moment a clip lands it is transcribed locally,
-# words the recogniser is unsure of are highlighted, and the person edits a
-# draft instead of starting from a blank box. The same pass reads how they
-# speak -- pitch, pace, pauses -- which then sets Speak's defaults for the voice.
-# ---------------------------------------------------------------------------
+# --- Clone tab: automatic transcript and voice profile -----------------------
 ASR_QUALITY = {"Accurate": asr.DEFAULT_MODEL, "Fast": asr.FAST_MODEL}
-# English by default: Whisper's own detection hears a Cape Town accent (plus the
-# "ja" and "lekker" in our hotwords) as Afrikaans and labels English clips "af".
+# English by default: auto-detection labels Cape Town English as Afrikaans.
 ASR_LANGUAGE = {"English": "en", "Afrikaans": "af", "Detect automatically": None}
 _GENERIC_NAMES = {"recording", "audio", "blob", "voice", "clip", "sample", "untitled", "new"}
 
@@ -1087,8 +1072,7 @@ def _asr_html(t: "asr.Transcript", seconds: float, snapped: bool) -> str:
                 "transcriber wasn't sure. Play the clip, then fix "
                 f"{'them' if unsure != 1 else 'it'} in the box below.")
     else:
-        # Not "every word is right": a recogniser can be confidently wrong
-        # ("light train" for "late train" in testing), so still ask for a read.
+        # Confident words can still be wrong, so still ask for a read-through.
         hint = ("Nothing was flagged as uncertain. Still read it once while the clip plays: "
                 "the voice learns from these exact words.")
     body = (f'<p class="tts-asr__words">{" ".join(words)}</p>' if words and not snapped else "")
@@ -1250,20 +1234,20 @@ def do_pick_voice(name):
         return None, _idle_html("No voice selected", art=False)
     ref = ref_clip_path(name)
     if not ref.exists():
-        # Voices made before clips were kept beside them record wherever the
-        # clip was, often relative to scripts/ (the CLI's working directory).
+        # Older voices recorded the clip's original path (often relative to scripts/).
         old = (voice_meta(name) or {}).get("ref_audio")
         old = Path(old) if old else None
         if old is not None and not old.is_absolute():
             old = (Path(__file__).resolve().parent / old).resolve()
-        ref = old if old is not None and old.exists() else None
+        roots = (VOICES_DIR.resolve(), SAMPLES_DIR.resolve())
+        ok = old is not None and old.is_file() and any(r in old.resolve().parents for r in roots)
+        ref = old if ok else None
     return (str(ref) if ref else None), _voice_card_html(f"voice:{name}")
 
 
 def do_delete_voice(name, armed):
-    """Two-step delete: the first press arms it, the second removes the voice
-    and its reference clip. Returns (status, speak dropdown, manage dropdown,
-    button, armed)."""
+    """Two-step delete of a voice and its clip.
+    Returns (status, speak dropdown, manage dropdown, button, armed)."""
     try:
         if not name:
             return _bad("Pick a voice to delete."), gr.update(), gr.update(), gr.update(), False
@@ -1272,7 +1256,7 @@ def do_delete_voice(name, armed):
                     f"<strong>{escape(name)}</strong> for good. Its saved clip is deleted too.</div>",
                     gr.update(), gr.update(), gr.update(value="Confirm delete"), True)
         delete_voice(name)
-        gr.Info(f"Deleted the voice '{name}'.")
+        gr.Info(f"Deleted the voice '{escape(name)}'.")
         remaining = list_voices()
         return ("",
                 gr.update(choices=voice_choices(), value="preset:ryan"),
@@ -1289,9 +1273,7 @@ def refresh_voice_lists():
             _voices_gallery_html())
 
 
-# ---------------------------------------------------------------------------
-# Recordings tab
-# ---------------------------------------------------------------------------
+# --- Recordings tab --------------------------------------------------------------
 def _recording_choices() -> List[Tuple[str, str]]:
     """Finished joins in output/, newest first. Per-line parts are excluded --
     they are working files, and the joined take is what you actually want."""
@@ -1347,15 +1329,13 @@ def do_delete_recording(path, armed):
         Path(path).unlink()
     except OSError as e:
         return _bad(f"Could not delete: {escape(str(e))}"), gr.update(), gr.update(value="Delete"), False
-    gr.Info(f"Deleted {Path(path).name}.")
+    gr.Info(f"Deleted {escape(Path(path).name)}.")
     choices = _recording_choices()
     return ("", gr.update(choices=choices, value=(choices[0][1] if choices else None)),
             gr.update(value="Delete"), False)
 
 
-# ---------------------------------------------------------------------------
-# Settings tab
-# ---------------------------------------------------------------------------
+# --- Settings tab ----------------------------------------------------------------
 def do_load_lexicon():
     try:
         return LEXICON_PATH.read_text(encoding="utf-8")
@@ -1368,8 +1348,7 @@ def do_load_lexicon():
 def do_save_lexicon(text):
     try:
         LEXICON_PATH.write_text(text or "", encoding="utf-8")
-        # textprep re-reads on mtime change, so the next generation picks this up
-        # with no restart.
+        # textprep reloads on mtime change; no restart needed.
         return ('<div class="tts-note tts-note--ok">Saved. It applies from the next '
                 'generation &mdash; no restart needed.</div>')
     except OSError as e:
@@ -1436,22 +1415,13 @@ def do_reset_speed():
     return f'<div class="tts-note tts-note--ok">{msg}</div>'
 
 
-# ---------------------------------------------------------------------------
-# UI
-#
-# Layout follows the order of the job: what to say, who says it, then the
-# result. The right-hand column is the render column -- progress first, because
-# that is what you watch, then the audio it produces, then the tools for
-# repairing it. Headings step h1 -> h2 -> h3 without skipping, every control
-# carries a real label, and status is announced politely to screen readers.
-# ---------------------------------------------------------------------------
+# --- UI: script, then voice, then result; labelled controls, polite status -----
 DELIVERY_INFO = ("Steady is calmer and more consistent, best on the small (0.6B) voice. "
                  "Expressive varies more but can wander.")
 TIDY_INFO = ("Spell out numbers, money, dates and symbols; strip markdown; one sentence per line. "
              "Pronunciation fixes in the lexicon always apply.")
 
-# One-click starter scripts. Fictional places and offers, so nothing reads as a
-# real advert or news claim.
+# Starter scripts. Fictional places and offers.
 SAMPLE_SCRIPTS = {
     "Howzit": ("Howzit everyone, and welcome back! It's a lekker sunny morning in Cape Town.\n\n"
                "The wind has finally calmed down, so grab a koeksister and let's get going."),
@@ -1470,8 +1440,7 @@ DESIGN_IDEAS = {
     "Help desk": "Bright young woman, friendly customer-service tone, clear and crisp",
 }
 
-# A passage to read when recording a reference clip: ~15 seconds, varied sounds,
-# a natural Capetonian register. Reading it means the transcript is known.
+# A ~15 s passage to read for a reference clip, so the transcript is known.
 READ_PASSAGE = ("Morning everyone! It's a lekker sunny day in Cape Town, and the wind is finally "
                 "taking a break. I'm going to grab a coffee, catch the train into town, and meet my "
                 "friends by the harbour at half past ten. Honestly, there's nowhere else I'd rather be.")
@@ -1506,8 +1475,7 @@ FOOTER_HTML = (
     "</div>"
 )
 
-# The text box's live counter, computed in the browser so typing never waits on
-# the server. Mirrors the app's own estimate: ~2.6 words a second of speech.
+# Live word counter, in the browser. ~2.6 words per second of speech.
 COUNTER_JS = """(text) => {
   const t = (text || '').trim();
   const words = t ? t.split(/\\s+/).length : 0;
@@ -1668,7 +1636,7 @@ def build_app() -> gr.Blocks:
                                                waveform_options=WAVEFORM)
                             c_status = gr.HTML(elem_classes="tts-status")
 
-                recorder.change(lambda p: p or gr.update(), inputs=[recorder], outputs=[a_audio])
+                recorder.change(_recorded_clip, inputs=[recorder], outputs=[a_audio])
                 a_audio.change(_clip_report_html, inputs=[a_audio], outputs=[a_report]).then(
                     do_transcribe, inputs=[a_audio, a_verbatim, a_quality, a_lang, a_name],
                     outputs=[asr_html, a_text, c_prof_html, c_prof, a_name])
@@ -1751,8 +1719,7 @@ def build_app() -> gr.Blocks:
                             gap_ms, para_gap, seed],
                     outputs=[audio, s_prog, status, speak_state, redo_line],
                 )
-                # queue=False so Stop is handled immediately rather than waiting
-                # behind the generation it is meant to interrupt.
+                # queue=False: Stop must not wait behind the run it stops.
                 stop_btn.click(do_cancel, outputs=[status], queue=False)
                 preview_btn.click(do_preview, inputs=[script, tidy, gap_ms, para_gap],
                                   outputs=[preview_md])
@@ -1946,13 +1913,10 @@ def build_app() -> gr.Blocks:
 
         refresh_btn.click(refresh_voice_lists, outputs=[voice, v_pick, gallery])
         demo.load(do_system_refresh, outputs=[sysbar])
-        # Hidden tabs mount lazily in Gradio 6: an event that targets one of
-        # their components before it exists leaves it stuck on "pending". So
-        # each tab fills itself when it is opened, which also keeps it fresh.
+        # Gradio 6 mounts hidden tabs lazily, so each tab fills itself when opened.
         voices_tab.select(refresh_voice_lists, outputs=[voice, v_pick, gallery]).then(
             do_pick_voice, inputs=[v_pick], outputs=[v_audio, v_card])
-        # Refreshing sets the dropdown, and its .change loads the player; loading
-        # here too raced it (two fetches of the same file, the first a 503).
+        # The dropdown's .change loads the player; loading here too raced it.
         rec_tab.select(do_refresh_recordings, outputs=[rec_list])
         settings_tab.select(do_refresh_sessions, outputs=[sess_list]).then(
             do_system_detail_refresh, outputs=[sys_detail])
@@ -1974,10 +1938,8 @@ THEME = gr.themes.Soft(
     font_mono=[gr.themes.GoogleFont("JetBrains Mono"), "Consolas", "ui-monospace", "monospace"],
     radius_size="lg",
 ).set(
-    # Every built-in component aligned with the brand tokens in ui/studio.css and
-    # checked for WCAG AA: text >= 4.5:1, control boundaries >= 3:1. Light first,
-    # then the _dark variant. Gradio has no _dark for color_accent or the shadows;
-    # studio.css sets --color-accent per theme instead.
+    # Brand tokens from ui/studio.css, WCAG AA checked (text 4.5:1, controls 3:1).
+    # color_accent has no _dark variant; studio.css sets it per theme.
     body_background_fill="#f6f3ef", body_background_fill_dark="#0a0e18",
     body_text_color="#171a26", body_text_color_dark="#eef1f8",
     body_text_color_subdued="#5d6578", body_text_color_subdued_dark="#8d97ad",
@@ -2046,12 +2008,59 @@ THEME = gr.themes.Soft(
 )
 
 
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+class LocalGuard:
+    """ASGI middleware: deny framing by other sites, and when bound to loopback,
+    reject requests whose Host header isn't this machine (blocks DNS rebinding)."""
+
+    def __init__(self, app, local_only: bool):
+        self.app = app
+        self.local_only = local_only
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            return await self.app(scope, receive, send)
+        if self.local_only:
+            host = dict(scope.get("headers") or []).get(b"host", b"").decode("latin-1").lower()
+            name = host[1:host.find("]")] if host.startswith("[") else host.rsplit(":", 1)[0]
+            if name not in LOCAL_HOSTS:
+                if scope["type"] == "websocket":
+                    return await send({"type": "websocket.close", "code": 1008})
+                await send({"type": "http.response.start", "status": 403,
+                            "headers": [(b"content-type", b"text/plain")]})
+                return await send({"type": "http.response.body", "body": b"Forbidden host"})
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                message.setdefault("headers", [])
+                message["headers"] = list(message["headers"]) + [
+                    (b"x-frame-options", b"SAMEORIGIN"),
+                    (b"content-security-policy", b"frame-ancestors 'self'"),
+                ]
+            await send(message)
+
+        return await self.app(scope, receive, send_with_headers)
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1, local only)")
     parser.add_argument("--port", type=int, default=7860, help="Port (default: 7860)")
-    parser.add_argument("--share", action="store_true", help="Create a public Gradio link")
+    parser.add_argument("--share", action="store_true", help="Create a public Gradio link (needs --auth)")
+    parser.add_argument("--auth", metavar="USER:PASSWORD",
+                        help="Require this login. Mandatory with --share or a non-local --host.")
     parser.add_argument("--device", default="cpu", help="torch device (default: cpu)")
     parser.add_argument("--offline", action="store_true",
                         help="Load from the local Hugging Face cache only (skip network checks)")
@@ -2072,6 +2081,17 @@ def main() -> int:
                         help="Development aid: replace the model with a fast stand-in that returns tones, "
                              "so every screen can be exercised without loading a checkpoint")
     args = parser.parse_args()
+
+    local_only = _is_loopback(args.host) and not args.share
+    auth = None
+    if args.auth:
+        user, sep, password = args.auth.partition(":")
+        if not (user and sep and password):
+            parser.error("--auth must look like USER:PASSWORD")
+        auth = (user, password)
+    elif not local_only:
+        parser.error("--share and a non-local --host expose your voices to other machines; "
+                     "add --auth USER:PASSWORD")
 
     CFG.device = args.device
     CFG.offline = args.offline
@@ -2101,10 +2121,12 @@ def main() -> int:
         server_name=args.host,
         server_port=args.port,
         share=args.share,
+        auth=auth,
         inbrowser=not args.no_browser,
-        # output/, voices/ and samples/ live outside the launch dir, so the players can't
-        # read a take or a reference clip without this.
+        # The players read takes and reference clips from these folders.
         allowed_paths=[str(OUTPUT_DIR), str(VOICES_DIR), str(SAMPLES_DIR)],
+        max_file_size=MAX_UPLOAD,
+        app_kwargs={"middleware": [Middleware(LocalGuard, local_only=local_only)]},
     )
     return 0
 

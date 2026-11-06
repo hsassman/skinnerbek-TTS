@@ -16,6 +16,9 @@ import soundfile as sf
 MIN_SECONDS = 3.0           # below this the speaker embedding is unreliable
 IDEAL_SECONDS = (5.0, 30.0)
 MAX_SECONDS = 60.0          # longer clips only slow encoding; refuse past this
+MAX_DECODE_SECONDS = 600.0  # not even decoded past this (reported as too long below it)
+MAX_DECODE_BYTES = 50 * 2**20
+MAX_CHANNELS = 8
 TARGET_PEAK = 0.89          # -1 dBFS
 SILENT_RMS_DB = -50.0       # a muted/blocked mic records this, not speech
 QUIET_RMS_DB = -36.0
@@ -50,8 +53,22 @@ def _db(x: float) -> float:
     return float(20 * np.log10(max(x, 1e-9)))
 
 
+def _check_size(path) -> None:
+    """Refuse clips too long or too large to decode safely, before decoding them."""
+    if Path(path).stat().st_size > MAX_DECODE_BYTES:
+        raise ValueError(f"That file is over {MAX_DECODE_BYTES // 2**20} MB. Use a 3 to 60 second clip.")
+    try:
+        info = sf.info(str(path))
+    except (RuntimeError, sf.LibsndfileError):
+        return  # not a libsndfile format; the byte cap above still applies
+    if info.channels > MAX_CHANNELS or info.duration > MAX_DECODE_SECONDS:
+        raise ValueError(f"That clip is {info.duration:.0f} s with {info.channels} channel(s). "
+                         "Use a 3 to 60 second mono or stereo clip.")
+
+
 def load_mono(path) -> Tuple[np.ndarray, int, int]:
     """(float32 mono waveform, sample rate, original channel count)."""
+    _check_size(path)
     try:
         data, sr = sf.read(str(path), dtype="float32", always_2d=True)
     except (RuntimeError, sf.LibsndfileError):

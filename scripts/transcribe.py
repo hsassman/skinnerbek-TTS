@@ -15,9 +15,7 @@ from typing import List, Optional
 
 import numpy as np
 
-# "large-v3-turbo" is Whisper large-v3 with a 4-layer decoder: near large-v3
-# accuracy at a fraction of the cost. int8 keeps it inside the 8 GB budget.
-# Measured on this repo's four hand-transcribed voice clips -- see README.
+# large-v3-turbo: near large-v3 accuracy, much cheaper; int8 fits in 8 GB. See README.
 DEFAULT_MODEL = "large-v3-turbo"
 FAST_MODEL = "small"
 
@@ -28,8 +26,7 @@ SA_HOTWORDS = (
     "Woodstock rand Mzansi shame sharp now-now just-now"
 )
 
-# Priming text: Whisper copies the style of the prompt, so a prompt with
-# disfluencies keeps them instead of tidying them away.
+# Whisper copies the prompt's style, so disfluencies here keep them in the transcript.
 _VERBATIM_PROMPT = "Umm, so, uh, I was like, hmm, you know... Okay. Right, ja."
 _CLEAN_PROMPT = "Hello, welcome. It's a lekker day in Cape Town."
 
@@ -38,9 +35,7 @@ FILLERS = {"um", "umm", "uh", "uhm", "er", "erm", "ah", "hmm", "mm", "mhm"}
 # A word below this confidence is highlighted for the user to check.
 UNSURE_BELOW = 0.6
 
-# Plain folders, not the Hugging Face cache: the cache symlinks blobs, which
-# Windows refuses without Developer Mode (WinError 1314). Outside the repo, so
-# the weights can never be committed.
+# Plain folders outside the repo (the HF cache's symlinks fail on Windows, WinError 1314).
 MODEL_DIR = Path.home() / ".cache" / "skinnerbek" / "whisper"
 
 
@@ -94,8 +89,7 @@ class VoiceProfile:
     delivery: str = "Natural"              # suggested delivery preset
     gap_ms: int = 300                      # suggested pause between sentences
     notes: List[str] = field(default_factory=list)
-    # Pitch over time, ~160 points (None where unvoiced), for the on-screen
-    # contour. Display only: dropped from what is saved with a voice.
+    # ~160 pitch points (None where unvoiced), for display only; not saved.
     contour: List[Optional[float]] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -114,10 +108,7 @@ class TranscriberUnavailable(RuntimeError):
     """faster-whisper missing, or the model isn't downloaded and we're offline."""
 
 
-# ---------------------------------------------------------------------------
-# Model cache. One recogniser at a time, behind a lock: Gradio handles requests
-# on worker threads and loading twice would double the RAM.
-# ---------------------------------------------------------------------------
+# --- Model cache: one recogniser, behind a lock (Gradio uses worker threads) ---
 _LOCK = threading.Lock()
 _MODEL = {"name": None, "obj": None}
 
@@ -152,9 +143,7 @@ def _get_model(name: str, offline: bool):
 
 
 def model_path(name: str, offline: bool = False) -> str:
-    """Local folder holding the CTranslate2 weights for `name`, downloading
-    them on first use. `local_dir` copies real files instead of the cache's
-    symlinks, which Windows refuses without Developer Mode (WinError 1314)."""
+    """Folder with the weights for `name`, downloaded on first use."""
     from faster_whisper.utils import _MODELS
 
     dest = MODEL_DIR / name
@@ -226,9 +215,7 @@ def transcribe(path: str, *, verbatim: bool = True, model_name: str = DEFAULT_MO
 
 
 def load_16k(path) -> np.ndarray:
-    """Mono float32 at 16 kHz, decoded by the same reader the clip checks use.
-    Passing samples (not a path) keeps faster-whisper off PyAV, whose newer
-    releases changed the open() signature it calls."""
+    """Mono float32 at 16 kHz. Samples, not a path: newer PyAV breaks faster-whisper's open()."""
     import refclip
 
     y, sr, _channels = refclip.load_mono(path)
@@ -244,10 +231,7 @@ def _tidy(text: str) -> str:
     return re.sub(r"\s+([,.!?;:])", r"\1", text)
 
 
-# ---------------------------------------------------------------------------
-# Passage matching. When the user reads the on-screen passage, its exact wording
-# is a better transcript than any recogniser's.
-# ---------------------------------------------------------------------------
+# --- Passage matching: a read of the on-screen passage uses its exact text ----
 def _norm_words(text: str) -> List[str]:
     """Lower-case words with numbers spelt out, so "24-bit" and "twenty four
     bit" compare equal -- formatting is not a recognition error."""
@@ -279,9 +263,7 @@ def word_error_rate(reference: str, hypothesis: str) -> float:
     return d[len(h)] / max(1, len(r))
 
 
-# ---------------------------------------------------------------------------
-# Delivery profile
-# ---------------------------------------------------------------------------
+# --- Delivery profile ------------------------------------------------------------
 def _pitch_track(y: np.ndarray, sr: int) -> np.ndarray:
     """F0 per 20 ms frame (Hz), NaN where unvoiced. YIN plus an energy and
     periodicity gate: fast enough for a 45 s clip and steady on speech."""
@@ -316,8 +298,7 @@ def profile(path: str, t: Optional[Transcript] = None) -> VoiceProfile:
         p.pitch_hz = float(np.median(voiced))
         p.pitch_lo, p.pitch_hi = (float(x) for x in np.percentile(voiced, [10, 90]))
         st = 12 * np.log2(voiced / p.pitch_hz)
-        # A percentile span, not a standard deviation: creaky phrase ends and the odd
-        # octave slip make the SD swing wildly, but they barely move the span.
+        # Percentile span, not SD: robust to creak and octave slips.
         p.pitch_range_st = float(np.percentile(st, 90) - np.percentile(st, 10))
         p.register = ("low" if p.pitch_hz < 120 else "medium" if p.pitch_hz < 185 else "high")
 
@@ -332,8 +313,7 @@ def profile(path: str, t: Optional[Transcript] = None) -> VoiceProfile:
         p.longest_pause = float(max(long_gaps, default=0.0))
         if long_gaps:
             p.pause_ms = int(np.median(long_gaps) * 1000)
-        # Pauses that follow the end of a sentence are what "pause between
-        # sentences" in Speak controls; match them when there are a few.
+        # Pauses after sentence ends set Speak's "pause between sentences".
         sent = [g for a, g in zip(words, gaps) if a.text.rstrip().endswith((".", "!", "?")) and g > 0.08]
         if len(sent) >= 2:
             p.gap_ms = int(min(1200, max(150, round(float(np.median(sent)) * 1000 / 50) * 50)))
@@ -353,8 +333,7 @@ def profile(path: str, t: Optional[Transcript] = None) -> VoiceProfile:
         p.pace = ("slow and deliberate" if p.wpm < 120 else "relaxed" if p.wpm < 150
                   else "conversational" if p.wpm < 175 else "brisk" if p.wpm < 200 else "fast")
     if p.pitch_range_st is not None:
-        # Bands checked against Praat on this repo's clips: read speech spans
-        # roughly 8-13 semitones; a flat read less, an energetic ad read more.
+        # Checked against Praat: read speech spans about 8-13 semitones.
         r = p.pitch_range_st
         p.expressiveness = "even and steady" if r < 8 else "natural" if r < 13 else "animated"
         p.delivery = "Steady" if r < 8 else "Natural" if r < 13 else "Expressive"
