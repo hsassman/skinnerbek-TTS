@@ -14,6 +14,10 @@ fi
 UV_VERSION=0.13.5
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64)
+    if [ "$(sw_vers -productVersion | cut -d. -f1)" -lt 14 ]; then
+      echo "Skinnerbek Studio needs macOS 14 (Sonoma) or newer. Update macOS, then run start again."
+      hold
+    fi
     UV_TARGET=aarch64-apple-darwin
     UV_SHA256=743f85035a1996ecb350659e01cd9faea9709829be09b1b4b03c73eaf3c9cd73
     APP_HOME="$HOME/Library/Application Support/SkinnerbekStudio" ;;
@@ -82,7 +86,8 @@ else
     "$UV" venv --quiet --python 3.12 "$VENV" || { echo "Python could not be installed. Check your internet connection and run start again."; hold; }
   fi
 
-  if ! cmp -s requirements.txt "$VENV/installed-requirements.txt"; then
+  if ! cmp -s requirements.txt "$VENV/installed-requirements.txt" ||
+     ! cmp -s constraints.txt "$VENV/installed-constraints.txt"; then
     echo "Installing the app's components (about 1.5 GB, first run only)..."
     if ! "$UV" pip install --python "$PY" -r requirements.txt; then
       echo "Installing components failed. Check your internet connection and free disk space,"
@@ -90,6 +95,7 @@ else
       hold
     fi
     cp requirements.txt "$VENV/installed-requirements.txt"
+    cp constraints.txt "$VENV/installed-constraints.txt"
   fi
 fi
 

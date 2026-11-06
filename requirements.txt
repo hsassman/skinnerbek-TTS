@@ -1,4 +1,6 @@
 # Pinned runtime dependencies (keep in sync with pyproject.toml).
+# constraints.txt pins everything they pull in to the tested versions.
+-c constraints.txt
 qwen-tts==0.1.1
 gradio==6.17.3
 soundfile==0.14.0

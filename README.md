@@ -18,7 +18,7 @@ extract it, then:
 
 - **Windows 10/11:** double-click **`start.bat`**. If Windows shows "Windows protected your
   PC", click **More info → Run anyway**.
-- **Mac (Apple silicon, M1 or newer):** double-click **`start.command`**. If macOS blocks it,
+- **Mac (Apple silicon M1 or newer, macOS 14 Sonoma or newer):** double-click **`start.command`**. If macOS blocks it,
   open **System Settings → Privacy & Security** and click **Open Anyway**, then double-click it
   again.
 
@@ -110,15 +110,17 @@ this repository.
 
 | | |
 |---|---|
-| OS | Windows 10/11 (developed and tested on Windows 10), or macOS on Apple silicon via `start.command` (not yet tested on a Mac) |
+| OS | Windows 10/11 (developed and tested on Windows 10), or macOS 14+ on Apple silicon via `start.command` (not yet tested on a Mac; PyTorch has no Intel-Mac or pre-14 builds) |
 | Python | 3.11+, tested on **3.12.2**. `start.bat` / `start.command` install their own 3.12 |
 | GPU | **Not required.** Runs CPU-only by default. A CUDA GPU can be used with `--device cuda:0` (not yet tested; CUDA version follows your PyTorch build) |
 | GPU VRAM | n/a on CPU. Roughly 2 GB for the 0.6B models and 4 GB for 1.7B in bfloat16 |
 | RAM | 8 GB minimum (0.6B models; 1.7B only in bfloat16 with other apps closed). **16–32 GB recommended** |
 | Disk | About 9 GB with the quick start (Python and packages ~1.5 GB, 0.6B voice models ~4.8 GB, speech recognition ~2.1 GB). VoiceDesign 1.7B adds ~3.5 GB |
 
-Pinned dependency versions are in [requirements.txt](requirements.txt) (mirrored in
-[pyproject.toml](pyproject.toml)).
+Direct dependencies are pinned in [requirements.txt](requirements.txt) (mirrored in
+[pyproject.toml](pyproject.toml)). [constraints.txt](constraints.txt) pins everything they pull
+in to the tested versions. After an upgrade that passes the tests, regenerate it with
+`pip freeze`, leaving out pytest and its plugins.
 
 ## Install
 

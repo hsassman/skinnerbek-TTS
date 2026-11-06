@@ -40,9 +40,13 @@ Skinnerbek Studio runs on the user's own machine and has no accounts. Its stores
 - The preset speaker is checked against the built-in list.
 - `.gitignore` now covers `.gradio/`, `*.webm`, `*.opus`, `*.aac`, `*.pem`, `*.key` and `credentials*.json`.
 
+### Dependency pinning
+
+A fresh install showed real drift: unpinned transitive dependencies resolved to untested versions, including librosa 1.0.0 instead of 0.11.0. `constraints.txt` now pins every dependency to the versions the tests pass against. `requirements.txt` references it, so pip and the launchers both honour it. The pinned set has pre-built wheels for Windows x64 and macOS 14+ on Apple silicon; `sox` is pure Python and installs from source.
+
 ### Not changed
 
-- **Transitive dependencies** are not hash-locked. The direct ones are pinned with `==`.
+- **Hashes:** dependencies are version-pinned, not hash-locked.
 - **Hugging Face model revisions** are not pinned. The models load as safetensors with no remote code.
 - **Google Fonts:** the theme loads them over the network, with local fallbacks.
 

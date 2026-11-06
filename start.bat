@@ -57,11 +57,15 @@ if errorlevel 1 goto :fail_python
 
 :deps
 fc /b "requirements.txt" "%VENV%\installed-requirements.txt" >nul 2>nul
+if errorlevel 1 goto :install
+fc /b "constraints.txt" "%VENV%\installed-constraints.txt" >nul 2>nul
 if not errorlevel 1 goto :run
+:install
 echo Installing the app's components (about 1.5 GB, first run only)...
 "%UV%" pip install --python "%PY%" -r requirements.txt
 if errorlevel 1 goto :fail_deps
 copy /y "requirements.txt" "%VENV%\installed-requirements.txt" >nul
+copy /y "constraints.txt" "%VENV%\installed-constraints.txt" >nul
 
 :run
 "%PY%" scripts\start.py
