@@ -2,7 +2,8 @@
 
 Whisper loads lazily and runs under a lock. Prompts preserve disfluencies;
 South African vocabulary and lexicon hotwords guide spelling. Uncertain words
-are exposed for review. unload() frees the recogniser before TTS model loads.
+are exposed for review. language=SPLIT transcribes English and Afrikaans parts
+of a clip separately, each in its own language. unload() frees the recogniser before TTS model loads.
 """
 from __future__ import annotations
 
@@ -29,6 +30,19 @@ SA_HOTWORDS = (
 # Whisper copies the prompt's style, so disfluencies here keep them in the transcript.
 _VERBATIM_PROMPT = "Umm, so, uh, I was like, hmm, you know... Okay. Right, ja."
 _CLEAN_PROMPT = "Hello, welcome. It's a lekker day in Cape Town."
+_PROMPTS = {"af": ("Uhm, so, ek was, hmm, jy weet... Okay. Reg, ja.",
+                   "Hallo, welkom. Dis 'n lekker dag in Kaapstad.")}
+
+# Split mode: each stretch of speech is checked for English or Afrikaans.
+SPLIT = "split"
+SPLIT_LANGUAGES = ("en", "af")
+# Cape Town English often scores ~0.5 Afrikaans, so Afrikaans must be clear-cut.
+AF_SURE = 0.75
+# Speech shorter than this is too little to tell; it joins its neighbour's language.
+MIN_DETECT_S = 2.0
+# Stretches closer than this are checked together (one check costs a model pass).
+JOIN_GAP_S = 1.0
+JOIN_MAX_S = 12.0
 
 FILLERS = {"um", "umm", "uh", "uhm", "er", "erm", "ah", "hmm", "mm", "mhm"}
 
@@ -48,6 +62,15 @@ class Word:
 
 
 @dataclass
+class Part:
+    """One stretch of a clip in one language."""
+    language: str
+    start: float
+    end: float
+    text: str
+
+
+@dataclass
 class Transcript:
     text: str
     words: List[Word]
@@ -55,6 +78,15 @@ class Transcript:
     language_prob: float
     duration: float
     model: str
+    parts: List[Part] = field(default_factory=list)
+
+    @property
+    def languages(self) -> List[str]:
+        """Languages heard, in the order they first come up."""
+        return list(dict.fromkeys(p.language for p in self.parts)) or [self.language]
+
+    def text_for(self, language: str) -> str:
+        return " ".join(p.text for p in self.parts if p.language == language and p.text)
 
     @property
     def unsure(self) -> List[Word]:
@@ -178,40 +210,119 @@ def lexicon_hotwords(lexicon_path: Optional[Path]) -> str:
     return " ".join(out[:40])
 
 
+def pick_language(probs: dict) -> str:
+    """English unless Afrikaans is clearly ahead (see AF_SURE)."""
+    af, en = probs.get("af", 0.0), probs.get("en", 0.0)
+    return "af" if af >= AF_SURE and af > en else "en"
+
+
+def speech_groups(chunks: List[tuple]) -> List[tuple]:
+    """(start, end) speech stretches in seconds, near neighbours joined so
+    fewer language checks are needed."""
+    out: List[list] = []
+    for a, b in chunks:
+        if out and a - out[-1][1] < JOIN_GAP_S and b - out[-1][0] <= JOIN_MAX_S:
+            out[-1][1] = b
+        else:
+            out.append([a, b])
+    return [tuple(g) for g in out]
+
+
+def language_runs(groups: List[tuple], langs: List[Optional[str]]) -> List[tuple]:
+    """(language, start, end) runs. A group with no language (too short to
+    tell) takes its neighbour's, and touching groups of one language merge."""
+    langs = list(langs)
+    known = [lg for lg in langs if lg]
+    fill = known[0] if known else "en"
+    for i, lg in enumerate(langs):
+        if lg is None:
+            langs[i] = langs[i - 1] if i else fill
+    runs: List[list] = []
+    for (a, b), lg in zip(groups, langs):
+        if runs and runs[-1][0] == lg:
+            runs[-1][2] = b
+        else:
+            runs.append([lg, a, b])
+    return [tuple(r) for r in runs]
+
+
+def _decode(model, audio, language, verbatim, hot, offset=0.0):
+    prompts = _PROMPTS.get(language, (_VERBATIM_PROMPT, _CLEAN_PROMPT))
+    segments, info = model.transcribe(
+        audio,
+        language=language,
+        beam_size=5,
+        word_timestamps=True,
+        vad_filter=True,
+        vad_parameters={"min_silence_duration_ms": 500},
+        condition_on_previous_text=False,
+        initial_prompt=prompts[0] if verbatim else prompts[1],
+        hotwords=hot or None,
+    )
+    words: List[Word] = []
+    texts: List[str] = []
+    for seg in segments:          # a generator: decoding happens here
+        texts.append(seg.text.strip())
+        for w in seg.words or []:
+            words.append(Word(w.word.strip(), float(w.start) + offset, float(w.end) + offset,
+                              float(w.probability)))
+    return _tidy(" ".join(t for t in texts if t)), words, info
+
+
+def _split_runs(model, audio) -> List[tuple]:
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+    sr = 16000
+    chunks = get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=500, speech_pad_ms=150))
+    groups = speech_groups([(c["start"] / sr, c["end"] / sr) for c in chunks])
+    langs: List[Optional[str]] = []
+    for a, b in groups:
+        if b - a < MIN_DETECT_S:
+            langs.append(None)
+            continue
+        _lang, _p, probs = model.detect_language(audio[int(a * sr):int(b * sr)])
+        langs.append(pick_language(dict(probs)))
+    return language_runs(groups, langs)
+
+
 def transcribe(path: str, *, verbatim: bool = True, model_name: str = DEFAULT_MODEL,
                language: Optional[str] = None, extra_hotwords: str = "",
                offline: bool = False, spoken_numbers: bool = True) -> Transcript:
-    """Transcribe one clip. `language=None` lets Whisper detect it.
-    `spoken_numbers` writes "24" as "twenty-four", matching what was said."""
+    """Transcribe one clip. `language=None` lets Whisper detect it; SPLIT
+    checks each stretch for English or Afrikaans and fills `parts`.
+    `spoken_numbers` writes "24" as "twenty-four" (English only)."""
     hot = " ".join(x for x in (SA_HOTWORDS, extra_hotwords) if x).strip()
     audio = load_16k(path)
+    sr = 16000
     with _LOCK:
         model = _get_model(model_name, offline)
-        segments, info = model.transcribe(
-            audio,
-            language=language,
-            beam_size=5,
-            word_timestamps=True,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 500},
-            condition_on_previous_text=False,
-            initial_prompt=_VERBATIM_PROMPT if verbatim else _CLEAN_PROMPT,
-            hotwords=hot or None,
-        )
-        words: List[Word] = []
-        texts: List[str] = []
-        for seg in segments:          # a generator: decoding happens here
-            texts.append(seg.text.strip())
-            for w in seg.words or []:
-                words.append(Word(w.word.strip(), float(w.start), float(w.end), float(w.probability)))
-    text = _tidy(" ".join(t for t in texts if t))
+        runs = _split_runs(model, audio) if language == SPLIT else []
+        if len({r[0] for r in runs}) > 1:
+            parts, words = [], []
+            for lg, a, b in runs:
+                lo, hi = max(0, int((a - 0.1) * sr)), min(len(audio), int((b + 0.1) * sr))
+                text, w, _info = _decode(model, audio[lo:hi], lg, verbatim, hot, lo / sr)
+                parts.append(Part(lg, a, b, text))
+                words += w
+            duration = len(audio) / sr
+            spoken: dict = {}
+            for p in parts:
+                spoken[p.language] = spoken.get(p.language, 0.0) + p.end - p.start
+            lang, prob = max(spoken, key=spoken.get), 1.0
+        else:
+            one = runs[0][0] if runs else ("en" if language == SPLIT else language)
+            text, words, info = _decode(model, audio, one, verbatim, hot)
+            parts = [Part(info.language, 0.0, float(info.duration), text)]
+            duration, lang, prob = float(info.duration), info.language, float(info.language_probability)
     if spoken_numbers:
         import textprep
 
-        text = textprep.spell_out_numbers(text)
-    return Transcript(text=text, words=words, language=info.language,
-                      language_prob=float(info.language_probability),
-                      duration=float(info.duration), model=model_name)
+        for p in parts:
+            if p.language == "en":
+                p.text = textprep.spell_out_numbers(p.text)
+    text = " ".join(p.text for p in parts if p.text)
+    return Transcript(text=text, words=words, language=lang, language_prob=prob,
+                      duration=duration, model=model_name, parts=parts)
 
 
 def load_16k(path) -> np.ndarray:

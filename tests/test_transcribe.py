@@ -89,3 +89,22 @@ def test_offline_without_model_says_how_to_fix(tmp_path, monkeypatch):
         assert "--offline" in str(e)
     else:
         raise AssertionError("expected TranscriberUnavailable")
+
+
+def test_afrikaans_only_when_clear_cut():
+    # Cape Town English often scores about half Afrikaans (seen on a real clip: af 0.54).
+    assert asr.pick_language({"en": 0.19, "af": 0.54}) == "en"
+    assert asr.pick_language({"en": 0.05, "af": 0.90}) == "af"
+    assert asr.pick_language({"es": 0.95, "en": 0.04}) == "en"
+
+
+def test_speech_groups_join_close_stretches_only():
+    groups = asr.speech_groups([(0.0, 3.0), (3.4, 5.0), (7.0, 9.0), (9.5, 22.0)])
+    assert groups == [(0.0, 5.0), (7.0, 9.0), (9.5, 22.0)]   # 9.5-22 would pass JOIN_MAX_S
+
+
+def test_language_runs_fill_short_groups_and_merge():
+    groups = [(0, 3), (3.5, 4), (6, 9), (10, 12), (13, 13.5)]
+    runs = asr.language_runs(groups, ["en", None, "af", "af", None])
+    assert runs == [("en", 0, 4), ("af", 6, 13.5)]
+    assert asr.language_runs([(0, 1)], [None]) == [("en", 0, 1)]

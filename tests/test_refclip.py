@@ -57,3 +57,13 @@ def test_prepare_trims_levels_and_writes_mono(tmp_path):
     # Samples were made at 24 kHz but written at 48 kHz: 4 s of speech, 1 s of
     # padding each side. Only ~0.3 s of that padding should survive the trim.
     assert rep.duration < 4.6
+
+
+def test_keep_spans_joins_only_the_chosen_parts():
+    import numpy as np
+
+    sr = 1000
+    wav = np.arange(10 * sr, dtype=np.float32)
+    out = refclip.keep_spans(wav, sr, [(1, 2), (5, 6)], gap_s=0.5)
+    assert len(out) == 2 * sr + sr // 2
+    assert out[0] == 1000 and out[-1] == 5999 and not out[sr:sr + sr // 2].any()

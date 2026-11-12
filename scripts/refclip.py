@@ -149,9 +149,23 @@ def trim_silence(wav: np.ndarray, sr: int, pad_s: float = 0.15) -> np.ndarray:
     return wav[start:end]
 
 
-def prepare(src, dest) -> Tuple[Path, ClipReport]:
-    """Write the cleaned clip a voice is built from. Returns (dest, report of the result)."""
+def keep_spans(wav: np.ndarray, sr: int, spans, gap_s: float = 0.3) -> np.ndarray:
+    """Only the (start, end) second spans of `wav`, joined by short silences."""
+    gap = np.zeros(int(sr * gap_s), dtype=wav.dtype)
+    pieces = []
+    for a, b in spans:
+        piece = wav[max(0, int(a * sr)):int(b * sr)]
+        if len(piece):
+            pieces += [piece, gap]
+    return np.concatenate(pieces[:-1]) if pieces else wav[:0]
+
+
+def prepare(src, dest, spans=None) -> Tuple[Path, ClipReport]:
+    """Write the cleaned clip a voice is built from, optionally only `spans`
+    (start, end seconds) of it. Returns (dest, report of the result)."""
     wav, sr, _ = load_mono(src)
+    if spans:
+        wav = keep_spans(wav, sr, spans)
     wav = trim_silence(wav, sr)
     peak = float(np.max(np.abs(wav))) if len(wav) else 0.0
     if peak > 0.01:

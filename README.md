@@ -63,6 +63,7 @@ on a Mac (the models live in `~/.cache/huggingface` and `~/.cache/skinnerbek`).
 - **Automatic transcripts.** A clip is transcribed locally with Whisper as soon as it arrives,
   word for word including "um" and "uh" (the cloning model hears them), tuned with South
   African vocabulary and your lexicon. Words it was unsure of are highlighted for checking.
+  A clip mixing English and Afrikaans is written per language, with a picker to show either.
   Accuracy was measured against hand-typed transcripts (see *Transcription* below).
 - **A read of the speaker's delivery.** Pitch and range, pace, pauses, fillers and clarity,
   with a pitch contour. Each saved voice keeps it, and Speak uses it to set that voice's
@@ -598,8 +599,18 @@ sides so formatting doesn't count as an error. On this 8 GB, 2-core machine:
 The app's tuning (verbatim priming, hotwords, spoken numbers) also helped turbo on the two clips
 re-run with it (11.9 % → 8.5 %, and 0 %); the other two weren't re-run. Turbo can still be
 confidently wrong ("light train" for "late train" at 98 % confidence), which is why the app
-asks for a read-through even when nothing is highlighted. Clip language defaults to English:
-Whisper's auto-detect labelled a Cape Town English clip as Afrikaans.
+asks for a read-through even when nothing is highlighted.
+
+**English and Afrikaans in one clip.** The default language setting checks each stretch of
+speech separately and writes it in the language it is spoken in, instead of forcing one
+language on the whole clip (which renders the other language's speech as a translation).
+Whisper's whole-clip auto-detect labelled Cape Town English as Afrikaans, and one 2-second
+English stretch scored 0.54 Afrikaans, so a stretch counts as Afrikaans only at 0.75 or
+more. When both languages are heard, a **Show** picker shows one language's transcript;
+choosing one also builds the voice from only those parts of the clip, so audio and words
+still match. The check costs one extra recogniser pass per stretch (a 9 s clip went from
+47 s to 89 s on the 8 GB test machine, model already loaded). This has been checked on English clips only
+so far: no bilingual clip is in the repo yet.
 
 Most remaining "errors" are spelling choices (Bancorp vs Bank Corp, HTD-189 vs HTD189), and
 at least one disagreement may be the hand-typed reference rather than the recogniser. Four

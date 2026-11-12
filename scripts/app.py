@@ -961,7 +961,7 @@ def _bad(msg: str) -> str:
     return f'<div class="tts-note tts-note--err" role="alert">{msg}</div>'
 
 
-def do_add_voice(name, ref_audio, ref_text, xvec_only, size, prof=None,
+def do_add_voice(name, ref_audio, ref_text, xvec_only, size, prof=None, show=None, parts=None,
                  progress=gr.Progress(track_tqdm=True)):
     """Returns (status html, speak voice dropdown, gallery html, manage dropdown,
     saved name -- None when nothing was saved)."""
@@ -986,7 +986,9 @@ def do_add_voice(name, ref_audio, ref_text, xvec_only, size, prof=None,
                          "Pick another name, or delete the old one under My voices."), *keep)
 
         progress(0.05, desc="Checking the clip…")
-        clean, report = refclip.prepare(ref_audio, ref_clip_path(name))
+        # One language picked under Show: only its parts, so the audio matches the words.
+        clean, report = refclip.prepare(ref_audio, ref_clip_path(name),
+                                        spans=_kept_spans(show, parts))
         if not report.ok:
             clean.unlink(missing_ok=True)
             why = "<br>".join(escape(m) for lvl, m in report.issues if lvl == "err")
@@ -1025,8 +1027,12 @@ def do_add_voice(name, ref_audio, ref_text, xvec_only, size, prof=None,
 
 # --- Clone tab: automatic transcript and voice profile -----------------------
 ASR_QUALITY = {"Accurate": asr.DEFAULT_MODEL, "Fast": asr.FAST_MODEL}
-# English by default: auto-detection labels Cape Town English as Afrikaans.
-ASR_LANGUAGE = {"English": "en", "Afrikaans": "af", "Detect automatically": None}
+# Split by default: each stretch is written in its own language. Whole-clip
+# auto-detection labels Cape Town English as Afrikaans, so it isn't the default.
+ASR_LANGUAGE = {"English and Afrikaans": asr.SPLIT, "English": "en", "Afrikaans": "af",
+                "Detect automatically": None}
+LANG_NAMES = {"en": "English", "af": "Afrikaans", "zu": "isiZulu", "xh": "isiXhosa"}
+ALL_LANGUAGES = "All languages"
 _GENERIC_NAMES = {"recording", "audio", "blob", "voice", "clip", "sample", "untitled", "new"}
 
 
@@ -1041,8 +1047,10 @@ def _suggest_name(path) -> Optional[str]:
     return stem if is_valid_name(stem) else None
 
 
-def _asr_busy_html(quality: str) -> str:
+def _asr_busy_html(quality: str, split: bool = False) -> str:
     first = "" if asr.is_loaded() else " The first clip also loads the speech model."
+    if split:
+        first = " Checking which parts are English and which are Afrikaans." + first
     pace = (" Accurate mode can take a minute or two on a slower computer; Fast (under "
             "Transcription options) is about four times quicker." if quality == "Accurate" else "")
     return (f'<div class="tts-asr tts-asr--busy" role="status">{_EQ}'
@@ -1059,10 +1067,9 @@ def _asr_html(t: "asr.Transcript", seconds: float, snapped: bool) -> str:
         else:
             words.append(txt)
     unsure = 0 if snapped else len(t.unsure)
-    lang = {"en": "English", "af": "Afrikaans", "zu": "isiZulu", "xh": "isiXhosa"}.get(
-        t.language, t.language.upper())
-    meta = (f'<span class="tts-tag">{escape(lang)}</span>'
-            f'<span class="tts-tag">{t.confidence:.0%} confident</span>'
+    langs = [LANG_NAMES.get(lg, lg.upper()) for lg in t.languages]
+    meta = ("".join(f'<span class="tts-tag">{escape(lg)}</span>' for lg in langs)
+            + f'<span class="tts-tag">{t.confidence:.0%} confident</span>'
             f'<span class="tts-tag">{seconds:.0f}s</span>')
     if snapped:
         hint = ("You read the passage, so its exact wording is used below. Change it if you "
@@ -1075,6 +1082,10 @@ def _asr_html(t: "asr.Transcript", seconds: float, snapped: bool) -> str:
         # Confident words can still be wrong, so still ask for a read-through.
         hint = ("Nothing was flagged as uncertain. Still read it once while the clip plays: "
                 "the voice learns from these exact words.")
+    if len(langs) > 1:
+        hint = (f"This clip has {' and '.join(langs)}. Each part is written in its own "
+                "language. Use <b>Show</b> to see one language: picking one also makes the "
+                "voice from only those parts of the clip. " + hint)
     body = (f'<p class="tts-asr__words">{" ".join(words)}</p>' if words and not snapped else "")
     return (f'<div class="tts-asr" role="status"><div class="tts-asr__head">'
             f'<span class="tts-asr__ok">{_icon("check")} Transcribed</span>'
@@ -1140,30 +1151,69 @@ def _profile_html(p: Optional[dict]) -> str:
     )
 
 
+def _parts_state(t: "asr.Transcript", text: str) -> dict:
+    """The transcript per language, with the clip spans each one covers."""
+    langs = {}
+    for p in t.parts:
+        d = langs.setdefault(LANG_NAMES.get(p.language, p.language.upper()),
+                             {"text": [], "spans": []})
+        d["text"].append(p.text)
+        d["spans"].append((p.start, p.end))
+    return {"all": text,
+            "langs": {k: {"text": " ".join(x for x in v["text"] if x), "spans": v["spans"]}
+                      for k, v in langs.items()}}
+
+
+def _show_update(parts: Optional[dict]):
+    names = list((parts or {}).get("langs") or {})
+    return gr.update(choices=[ALL_LANGUAGES] + names, value=ALL_LANGUAGES, visible=len(names) > 1)
+
+
+def do_show_language(show, parts):
+    """The transcript box shows one language's parts, or all of them."""
+    if not parts:
+        return gr.update()
+    one = (parts.get("langs") or {}).get(show)
+    return one["text"] if one else parts.get("all", "")
+
+
+def _kept_spans(show, parts):
+    """Clip spans to build the voice from; None means the whole clip."""
+    langs = (parts or {}).get("langs") or {}
+    if show not in langs or len(langs) < 2:
+        return None
+    return [tuple(sp) for sp in langs[show]["spans"]]
+
+
 def do_transcribe(path, verbatim, quality, language, current_name):
     """Clip -> (transcript status, transcript text, profile html, profile state,
-    name). A generator so the 'listening' state shows while it works."""
+    name, show dropdown, per-language parts). A generator so the 'listening'
+    state shows while it works."""
     keep_name = gr.update()
+    no_split = (gr.update(choices=[ALL_LANGUAGES], value=ALL_LANGUAGES, visible=False), None)
     if not path:
-        yield ("", gr.update(), _profile_html(None), None, keep_name)
+        yield ("", gr.update(), _profile_html(None), None, keep_name, *no_split)
         return
     quality = quality or "Accurate"
-    yield (_asr_busy_html(quality), gr.update(), gr.update(), gr.update(), gr.update())
+    code = ASR_LANGUAGE.get(language or "English and Afrikaans", asr.SPLIT)
+    yield (_asr_busy_html(quality, code == asr.SPLIT), gr.update(), gr.update(), gr.update(),
+           gr.update(), *no_split)
     started = time.time()
     try:
         t = asr.transcribe(
             path, verbatim=bool(verbatim), model_name=ASR_QUALITY.get(quality, asr.DEFAULT_MODEL),
-            language=ASR_LANGUAGE.get(language or "English", "en"),
+            language=code,
             extra_hotwords=asr.lexicon_hotwords(LEXICON_PATH), offline=CFG.offline)
     except asr.TranscriberUnavailable as e:
         yield (f'<div class="tts-note tts-note--warn" role="alert">{escape(str(e))} Meanwhile, '
-               "type what is said in the clip below.</div>", gr.update(), gr.update(), None, keep_name)
+               "type what is said in the clip below.</div>", gr.update(), gr.update(), None, keep_name,
+               *no_split)
         return
     except Exception as e:  # noqa: BLE001
         print(f"transcribe: {type(e).__name__}: {e}", file=sys.stderr)
         yield (_bad("<strong>The transcript couldn't be made.</strong> Type what is said in the "
                     "clip below instead."),
-               gr.update(), gr.update(), None, keep_name)
+               gr.update(), gr.update(), None, keep_name, *no_split)
         return
     text = t.text
     snapped = asr.match_passage(text, READ_PASSAGE) >= 0.85
@@ -1182,9 +1232,11 @@ def do_transcribe(path, verbatim, quality, language, current_name):
     if not text.strip():
         yield ('<div class="tts-note tts-note--warn" role="alert">No speech found in this clip. '
                "Try a clip where someone is talking clearly.</div>", "", _profile_html(prof_d),
-               prof_d, name)
+               prof_d, name, *no_split)
         return
-    yield (_asr_html(t, time.time() - started, snapped), text, _profile_html(prof_d), prof_d, name)
+    parts = _parts_state(t, text)
+    yield (_asr_html(t, time.time() - started, snapped), text, _profile_html(prof_d), prof_d, name,
+           _show_update(parts), parts)
 
 
 def _strip_contour(prof):
@@ -1575,6 +1627,12 @@ def build_app() -> gr.Blocks:
                                            "exact words, so fix anything that's wrong."))
                             asr_html = gr.HTML(_idle_html(
                                 "Waiting for a clip", " Add one above and the words appear here.", art=False))
+                            a_parts = gr.State(None)
+                            a_show = gr.Dropdown(
+                                [ALL_LANGUAGES], value=ALL_LANGUAGES, label="Show", visible=False,
+                                elem_id="tts-show-lang",
+                                info="Picking one language makes the voice from only its parts of "
+                                     "the clip. Switching replaces the text below, edits included.")
                             a_text = gr.Textbox(
                                 label="Transcript", lines=4, max_lines=12, elem_id="tts-transcript",
                                 placeholder="The words spoken in the clip appear here. You can edit them.",
@@ -1590,7 +1648,10 @@ def build_app() -> gr.Blocks:
                                     info="Accurate catches accents and names best. Fast is quicker on "
                                          "a slow computer.")
                                 a_lang = gr.Dropdown(
-                                    list(ASR_LANGUAGE), value="English", label="Language spoken in the clip")
+                                    list(ASR_LANGUAGE), value="English and Afrikaans",
+                                    label="Language spoken in the clip",
+                                    info="English and Afrikaans writes each part in the language "
+                                         "it is spoken in.")
                                 a_redo = gr.Button("Transcribe again", variant="secondary", size="sm")
 
                         with gr.Column(elem_classes="tts-card", elem_id="tts-save-card"):
@@ -1639,9 +1700,10 @@ def build_app() -> gr.Blocks:
                 recorder.change(_recorded_clip, inputs=[recorder], outputs=[a_audio])
                 a_audio.change(_clip_report_html, inputs=[a_audio], outputs=[a_report]).then(
                     do_transcribe, inputs=[a_audio, a_verbatim, a_quality, a_lang, a_name],
-                    outputs=[asr_html, a_text, c_prof_html, c_prof, a_name])
+                    outputs=[asr_html, a_text, c_prof_html, c_prof, a_name, a_show, a_parts])
                 a_redo.click(do_transcribe, inputs=[a_audio, a_verbatim, a_quality, a_lang, a_name],
-                             outputs=[asr_html, a_text, c_prof_html, c_prof, a_name])
+                             outputs=[asr_html, a_text, c_prof_html, c_prof, a_name, a_show, a_parts])
+                a_show.input(do_show_language, inputs=[a_show, a_parts], outputs=[a_text])
                 c_btn.click(do_clone_try, inputs=[c_saved, c_script, c_delivery],
                             outputs=[c_audio, c_prog, c_status])
 
@@ -1749,7 +1811,8 @@ def build_app() -> gr.Blocks:
                             v_armed = gr.State(False)
                             v_status = gr.HTML(elem_classes="tts-status")
 
-                a_btn.click(do_add_voice, inputs=[a_name, a_audio, a_text, a_xvec, a_size, c_prof],
+                a_btn.click(do_add_voice, inputs=[a_name, a_audio, a_text, a_xvec, a_size, c_prof,
+                                                  a_show, a_parts],
                             outputs=[a_status, voice, gallery, v_pick, c_saved]).then(
                     _try_ready, inputs=[c_saved], outputs=[c_note, c_btn, c_delivery])
                 new_voice_btn.click(lambda: gr.Tabs(selected="clone"), outputs=[tabs], queue=False)
