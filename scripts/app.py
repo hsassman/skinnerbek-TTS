@@ -12,6 +12,7 @@ Styles and browser code live in ui/. One model is loaded at a time (8 GB RAM).
 import argparse
 import gc
 import ipaddress
+import itertools
 import os
 import queue
 import re
@@ -502,16 +503,21 @@ _EQ = '<span class="tts-eq" aria-hidden="true"><i></i><i></i><i></i><i></i><i></
 # A small waveform-in-a-bubble for empty states, in the brand gradient.
 _EMPTY_ART = (
     '<svg class="tts-empty__art" viewBox="0 0 120 72" aria-hidden="true">'
-    '<defs><linearGradient id="tts-sunset-e" x1="0" x2="1"><stop offset="0" stop-color="#ff6b5a"/>'
+    '<defs><linearGradient id="{gid}" x1="0" x2="1"><stop offset="0" stop-color="#ff6b5a"/>'
     '<stop offset="1" stop-color="#ffb547"/></linearGradient></defs>'
     '<rect class="b" x="14" y="6" width="92" height="52" rx="16"/><path class="b" d="M30 56l-8 12 18-10z"/>'
-    '<path class="s" d="M34 32v0M44 24v16M54 18v28M64 26v12M74 20v24M84 30v4"/></svg>'
+    '<path class="s" style="stroke:url(#{gid})" '
+    'd="M34 32v0M44 24v16M54 18v28M64 26v12M74 20v24M84 30v4"/></svg>'
 )
+# Each copy needs its own gradient id: a shared one resolves to the first copy,
+# and when that sits in a hidden tab the bars paint nothing.
+_ART_IDS = itertools.count()
 
 
 def _idle_html(title: str = "Nothing rendering", msg: str = "", art: bool = True) -> str:
     body = f"<b>{escape(title)}</b>{escape(msg)}" if msg else f"<b>{escape(title)}</b>"
-    return f'<div class="tts-empty">{_EMPTY_ART if art else ""}{body}</div>'
+    svg = _EMPTY_ART.format(gid=f"tts-sunset-e{next(_ART_IDS)}") if art else ""
+    return f'<div class="tts-empty">{svg}{body}</div>'
 
 
 def _title(icon: str, title: str, sub: str = "") -> str:
