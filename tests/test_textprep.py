@@ -25,6 +25,12 @@ from textprep import (
     ("no terminal punctuation here", "No terminal punctuation here."),
     ("Meet at 9:05.", "Meet at nine oh five."),
     ("See [the docs](http://x.y) please.", "See the docs please."),
+    ("It costs R250 on 3 May.", "It costs two hundred and fifty rand on the third of May."),
+    ("From 3 March to 15 April 2026.",
+     "From the third of March to the fifteenth of April twenty twenty-six."),
+    ("Not June 5.", "Not June the fifth."),
+    ("In May 2024 we sold 12 units.", "In May twenty twenty-four we sold twelve units."),
+    ("You may 3 times try.", "You may three times try."),
 ])
 def test_normalize_line(src, want):
     assert normalize_line(src) == want

@@ -1,5 +1,6 @@
 """Shared helpers for the Qwen3-TTS scripts. CPU by default; --device cuda:0 for a GPU."""
 import argparse
+import contextlib
 import gc
 import os
 import sys
@@ -407,16 +408,74 @@ def run_design(model, lines: List[str], *, language: str, instruct: str,
     )
 
 
+# Frames of the reference clip (12 a second) kept as left context when a cloned
+# line is turned into audio. qwen_tts decodes the whole reference again for every
+# line and throws that audio away: 14 s of a 47 s line with a 9 s clip, more with
+# a longer one. With 50 frames the spectrum differs from the full decode by
+# 0.25 dB on average (0.86 dB at the 95th percentile), measured on a real line;
+# the library's own long-audio decoder keeps 25. 0 = decode the whole reference.
+CLONE_DECODE_CONTEXT = 50
+
+
+def _reference_frames(voice_clone_prompt) -> int:
+    """Length of the one reference clip in `voice_clone_prompt`, in codec frames.
+    0 when there isn't exactly one (nothing is trimmed then)."""
+    if not isinstance(voice_clone_prompt, (list, tuple)) or len(voice_clone_prompt) != 1:
+        return 0
+    code = getattr(voice_clone_prompt[0], "ref_code", None)
+    try:
+        return int(code.shape[0]) if code is not None else 0
+    except Exception:
+        return 0
+
+
+@contextlib.contextmanager
+def short_reference_decode(model, voice_clone_prompt, context: Optional[int] = None):
+    """While active, cloned lines decode with only the last `context` reference
+    frames in front of them instead of the whole clip (see CLONE_DECODE_CONTEXT)."""
+    context = CLONE_DECODE_CONTEXT if context is None else context
+    ref_len = _reference_frames(voice_clone_prompt)
+    tokenizer = getattr(getattr(model, "model", None), "speech_tokenizer", None)
+    drop = ref_len - context if (context and ref_len) else 0
+    if tokenizer is None or drop <= 0:
+        yield
+        return
+    real = tokenizer.decode
+
+    def decode(encoded):
+        import numpy as np
+
+        ours = isinstance(encoded, list) and encoded and all(
+            isinstance(e, dict) and set(e) == {"audio_codes"} and len(e["audio_codes"]) > ref_len
+            for e in encoded)
+        if not ours:
+            return real(encoded)
+        wavs, sr = real([{"audio_codes": e["audio_codes"][drop:]} for e in encoded])
+        out = []
+        for e, wav in zip(encoded, wavs):
+            per_frame = len(wav) // (len(e["audio_codes"]) - drop)
+            # The caller cuts the reference's share off the front; give it silence to cut.
+            out.append(np.concatenate([np.zeros(drop * per_frame, dtype=wav.dtype), wav]))
+        return out, sr
+
+    tokenizer.decode = decode
+    try:
+        yield
+    finally:
+        del tokenizer.decode
+
+
 def run_clone(model, lines: List[str], *, language: str, voice_clone_prompt=None,
               ref_audio: Optional[str] = None, ref_text: Optional[str] = None,
               x_vector_only: bool = False, sampling: Dict[str, Any]):
     if voice_clone_prompt is not None:
-        return model.generate_voice_clone(
-            text=lines,
-            language=language,
-            voice_clone_prompt=voice_clone_prompt,
-            **sampling,
-        )
+        with short_reference_decode(model, voice_clone_prompt):
+            return model.generate_voice_clone(
+                text=lines,
+                language=language,
+                voice_clone_prompt=voice_clone_prompt,
+                **sampling,
+            )
     return model.generate_voice_clone(
         text=lines,
         language=language,
@@ -451,8 +510,10 @@ def configure_threads(threads: Optional[int] = None) -> int:
 
 # --- machine facts and a speed estimate ---------------------------------------
 
-def system_report() -> Dict[str, Any]:
-    """Everything that decides generation speed (dtype, bf16 support, threads, RAM)."""
+def system_report(loaded_dtype: Optional[str] = None) -> Dict[str, Any]:
+    """Everything that decides generation speed (dtype, bf16 support, threads, RAM).
+    `loaded_dtype` is the precision of the model in memory, when there is one;
+    otherwise the report says what the next load would pick."""
     import platform
 
     cores = threads = None
@@ -466,6 +527,7 @@ def system_report() -> Dict[str, Any]:
 
     avail = free_gb()
     low = auto_low_memory()
+    dtype = loaded_dtype or str(resolve_dtype("cpu", "0.6B", "auto", low_memory=low)).split(".")[-1]
     return {
         "cpu": (platform.processor() or platform.machine() or "unknown"),
         "cores": cores,
@@ -476,8 +538,8 @@ def system_report() -> Dict[str, Any]:
         "free_gb": avail,
         "total_gb": _total_gb(),
         "low_memory": low,
-        "dtype": str(resolve_dtype("cpu", "0.6B", "auto", low_memory=low)).split(".")[-1],
-        "sec_per_frame": seconds_per_frame(),
+        "dtype": dtype,
+        "sec_per_frame": seconds_per_frame(dtype),
     }
 
 
@@ -582,9 +644,9 @@ def speed_sample_count(dtype_name: Optional[str] = None) -> int:
     return len(_samples(_speed_table(), dtype_name or _dtype_key()))
 
 
-def estimate_seconds(text_lines: List[str]) -> Optional[float]:
+def estimate_seconds(text_lines: List[str], dtype_name: Optional[str] = None) -> Optional[float]:
     """Rough seconds to generate `text_lines`, or None before any measurement."""
-    spf = seconds_per_frame()
+    spf = seconds_per_frame(dtype_name)
     if not spf:
         return None
     frames = sum(max(1.0, len(t) / CHARS_PER_SECOND) * CODEC_HZ for t in text_lines)

@@ -25,7 +25,9 @@ extract it, then:
 The first start downloads a private copy of Python (3.12), the app's components and the voice
 models: about **9 GB**, once. After that it starts offline in under a minute. Your browser opens
 on Skinnerbek Studio; keep the black window open while you use it, and close it to stop the app.
-Starting it again while it runs just reopens the browser tab.
+Starting it again while it runs just reopens the browser tab, unless the app's files have
+changed since it was started (an update): then the old copy is restarted so the update takes
+effect. A copy that is busy rendering is left alone.
 
 Everything installs into one folder, so removing it is one delete:
 `%LOCALAPPDATA%\SkinnerbekStudio` on Windows, `~/Library/Application Support/SkinnerbekStudio`
@@ -301,6 +303,32 @@ when a CLI run is sharing the box with the Gradio server.
 Manager: if "In use" is pegged and the disk is at 100%, it's paging, not hung. A useful sanity
 check is CPU time versus wall time: much under 100% of `--threads` cores means it is stalling on
 page faults rather than computing.
+
+**Where the time goes (measured 2026-11-12, i5-7200U, 0.6B float32).** A profile of one line:
+68 % of the time is the matrix maths on the weights, and 58 % of the total is the small code
+predictor, which runs 15 times per audio frame. Each frame moves about 5 GB of weights through
+memory, so this CPU is limited by memory speed, not by Python: a hand-written replacement for
+the library's inner loop produced identical output and was 2-4 % faster, int8 weights were no
+faster per step, and pinning the model in RAM gained about 5 %. None of those shipped. Two
+threads is the best setting here (1: 26 ms, 2: 22 ms, 4: 24 ms per predictor step).
+
+What did make a difference:
+
+- **The app no longer re-decides float32 or bfloat16 on every take.** Free RAM is low once a
+  model is loaded, because the model is what fills it, so the second take used to discard the
+  float32 model and reload it as emulated bfloat16. A line that takes 33 s was still not
+  finished after 150 s. The precision is now chosen once, when a model loads, after the
+  previous model has been freed.
+- **Cloned lines no longer re-decode the whole reference clip.** The library turns the
+  reference clip back into audio for every line and discards it. Only the last 50 frames
+  (about 4 s) are now kept as context (`common.CLONE_DECODE_CONTEXT`; 0 restores the library
+  behaviour). With a 9 s clip the decode step went from 14 s to 7.5 s per line; a longer clip
+  saves more. Against the full decode the spectrum differs by 0.25 dB on average (0.86 dB at
+  the 95th percentile), and a take made this way transcribed back with no word errors, but
+  the waveform is not bit-identical: listen once and set it to 0 if you hear a difference.
+
+After both, a two-line cloned take measured 1 m 17 s for 5.4 s of audio (about 14 s of
+compute per second of audio), against 21 s per second for the first take before the changes.
 
 ## Gotchas worth knowing
 
@@ -608,9 +636,11 @@ Whisper's whole-clip auto-detect labelled Cape Town English as Afrikaans, and on
 English stretch scored 0.54 Afrikaans, so a stretch counts as Afrikaans only at 0.75 or
 more. When both languages are heard, a **Show** picker shows one language's transcript;
 choosing one also builds the voice from only those parts of the clip, so audio and words
-still match. The check costs one extra recogniser pass per stretch (a 9 s clip went from
-47 s to 89 s on the 8 GB test machine, model already loaded). This has been checked on English clips only
-so far: no bilingual clip is in the repo yet.
+still match. A clip that is one continuous stretch is checked and transcribed in a single
+recogniser pass (34 s for a 9 s clip on the 8 GB test machine, the same as forcing English).
+A clip with pauses of a second or more pays one extra pass per stretch (a 16 s clip with two
+stretches: 95 s against 34 s), so pick *English* for an all-English clip with long pauses.
+This has been checked on English clips only so far: no bilingual clip is in the repo yet.
 
 Most remaining "errors" are spelling choices (Bancorp vs Bank Corp, HTD-189 vs HTD189), and
 at least one disagreement may be the hand-typed reference rather than the recogniser. Four

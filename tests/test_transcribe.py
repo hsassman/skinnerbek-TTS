@@ -108,3 +108,20 @@ def test_language_runs_fill_short_groups_and_merge():
     runs = asr.language_runs(groups, ["en", None, "af", "af", None])
     assert runs == [("en", 0, 4), ("af", 6, 13.5)]
     assert asr.language_runs([(0, 1)], [None]) == [("en", 0, 1)]
+
+
+def test_same_audio_is_encoded_once():
+    calls = []
+
+    class Model:
+        def encode(self, features):
+            calls.append(features.shape)
+            return len(calls)
+
+    m = Model()
+    asr._remember_last_encode(m)
+    a, b = np.ones((80, 3000), np.float32), np.zeros((80, 3000), np.float32)
+    assert m.encode(a) == 1 and m.encode(a.copy()) == 1      # the repeat is free
+    assert m.encode(b) == 2 and m.encode(a) == 3             # only the latest is kept
+    m.encode.forget()
+    assert m.encode(a) == 4

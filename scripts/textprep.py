@@ -151,6 +151,10 @@ def _int_to_words(n: int) -> str:
     return _ONES[n]
 
 
+_MONTHS = ("January|February|March|April|May|June|July|August|September|October|"
+           "November|December")
+
+
 def _ordinal_words(n: int) -> str:
     words = _int_to_words(n)
     last = words.split()[-1].split("-")[-1]
@@ -244,6 +248,12 @@ def _expand_numbers(text: str) -> str:
             else base + "s"
 
     text = re.sub(r"\b'?(\d{2}|\d{4})s\b", decade, text)
+
+    # dates: 3 May -> the third of May; May 3 -> May the third (at a comma, year or sentence end)
+    text = re.sub(rf"(?<![\w.,])([1-9]|[12]\d|3[01])\s+({_MONTHS})\b",
+                  lambda m: f"the {_ordinal_words(int(m.group(1)))} of {m.group(2)}", text)
+    text = re.sub(rf"\b({_MONTHS})\s+([1-9]|[12]\d|3[01])(?=,|\s+(?:1[1-9]|20)\d{{2}}\b|[.!?]|$)",
+                  lambda m: f"{m.group(1)} the {_ordinal_words(int(m.group(2)))}", text)
 
     # ordinals: 3rd -> third, 21st -> twenty-first
     text = re.sub(r"\b(\d{1,3})(?:st|nd|rd|th)\b",

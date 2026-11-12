@@ -84,6 +84,53 @@ def running_studio(port: int) -> bool:
         return False
 
 
+def code_stamp() -> float:
+    """When the app's own code last changed (newest file under scripts/)."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent
+    files = [f for pat in ("*.py", "ui/*", "ui/vendor/*") for f in root.glob(pat) if f.is_file()]
+    return max((f.stat().st_mtime for f in files), default=0.0)
+
+
+def studio_process(port: int):
+    """The Studio process listening on `port`, or None if it can't be identified."""
+    try:
+        import psutil
+
+        for c in psutil.net_connections(kind="tcp"):
+            if c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port == port and c.pid:
+                proc = psutil.Process(c.pid)
+                line = " ".join(proc.cmdline())
+                # Only ever stop our own app, never whatever else holds the port.
+                return proc if ("start.py" in line or "app.py" in line) else None
+    except Exception:
+        pass
+    return None
+
+
+def replace_if_outdated(port: int) -> bool:
+    """Stop a running Studio that was started before the code last changed, so
+    an update takes effect. True when it was stopped. A copy that is busy
+    (rendering) is left alone."""
+    proc = studio_process(port)
+    if proc is None:
+        return False
+    try:
+        if proc.create_time() >= code_stamp():
+            return False
+        if proc.cpu_percent(interval=1.0) > 50:
+            say("An older copy of Skinnerbek Studio is running and is busy, so it was left alone.")
+            say("When it has finished, close its window and run start again to get the update.")
+            return False
+        say("Skinnerbek Studio has been updated since it was started. Restarting it...")
+        proc.terminate()
+        proc.wait(timeout=15)
+        return True
+    except Exception:
+        return False
+
+
 def free_port() -> int:
     for port in PORTS:
         with socket.socket() as s:
@@ -99,6 +146,8 @@ def main() -> int:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     for port in PORTS:
         if running_studio(port):
+            if replace_if_outdated(port):
+                continue
             say(f"Skinnerbek Studio is already running. Opening http://127.0.0.1:{port}")
             webbrowser.open(f"http://127.0.0.1:{port}")
             return 0

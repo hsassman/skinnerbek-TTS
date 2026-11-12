@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import difflib
 import re
+import sys
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -170,8 +171,31 @@ def _get_model(name: str, offline: bool):
             "Speech recognition isn't installed. Run: pip install faster-whisper") from e
     _MODEL["obj"] = None
     model = WhisperModel(model_path(name, offline), device="cpu", compute_type="int8")
+    _remember_last_encode(model)
     _MODEL.update(name=name, obj=model)
     return model
+
+
+def _remember_last_encode(model) -> None:
+    """Keep the most recent encoder pass so the same audio isn't encoded twice.
+
+    The encoder is most of the cost on a CPU. A language check and the
+    transcription that follows encode the same 30-second window, so the second
+    call returns the first one's result."""
+    import hashlib
+
+    real = model.encode
+    last: dict = {}
+
+    def encode(features):
+        key = (features.shape, hashlib.sha1(np.ascontiguousarray(features).tobytes()).digest())
+        if last.get("key") != key:
+            last.clear()
+            last.update(key=key, out=real(features))
+        return last["out"]
+
+    encode.forget = last.clear
+    model.encode = encode
 
 
 def model_path(name: str, offline: bool = False) -> str:
@@ -254,7 +278,7 @@ def _decode(model, audio, language, verbatim, hot, offset=0.0):
         beam_size=5,
         word_timestamps=True,
         vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 500},
+        vad_parameters=dict(_VAD),
         condition_on_previous_text=False,
         initial_prompt=prompts[0] if verbatim else prompts[1],
         hotwords=hot or None,
@@ -269,12 +293,39 @@ def _decode(model, audio, language, verbatim, hot, offset=0.0):
     return _tidy(" ".join(t for t in texts if t)), words, info
 
 
-def _split_runs(model, audio) -> List[tuple]:
+_VAD = {"min_silence_duration_ms": 500}
+
+
+def _clip_language(model, audio) -> dict:
+    """Language probabilities for the clip's first 30 seconds of speech.
+
+    Builds the window exactly as model.transcribe() will (same VAD, same
+    trimming), so the transcription that follows reuses this encoder pass
+    (see _remember_last_encode) instead of paying for a second one."""
+    from faster_whisper.audio import pad_or_trim
+    from faster_whisper.vad import VadOptions, collect_chunks, get_speech_timestamps
+
+    chunks = get_speech_timestamps(audio, VadOptions(**_VAD))
+    if chunks:
+        pieces, _meta = collect_chunks(audio, chunks)
+        audio = np.concatenate(pieces, axis=0)
+    features = model.feature_extractor(audio)
+    window = pad_or_trim(features[:, :min(model.feature_extractor.nb_max_frames,
+                                          features.shape[-1] - 1)])
+    results = model.model.detect_language(model.encode(window))[0]
+    return {token[2:-2]: float(prob) for token, prob in results}
+
+
+def _speech_groups_of(audio) -> List[tuple]:
     from faster_whisper.vad import VadOptions, get_speech_timestamps
 
     sr = 16000
     chunks = get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=500, speech_pad_ms=150))
-    groups = speech_groups([(c["start"] / sr, c["end"] / sr) for c in chunks])
+    return speech_groups([(c["start"] / sr, c["end"] / sr) for c in chunks])
+
+
+def _split_runs(model, audio, groups: List[tuple]) -> List[tuple]:
+    sr = 16000
     langs: List[Optional[str]] = []
     for a, b in groups:
         if b - a < MIN_DETECT_S:
@@ -296,7 +347,21 @@ def transcribe(path: str, *, verbatim: bool = True, model_name: str = DEFAULT_MO
     sr = 16000
     with _LOCK:
         model = _get_model(model_name, offline)
-        runs = _split_runs(model, audio) if language == SPLIT else []
+        runs, detected = [], None
+        try:
+            if language == SPLIT:
+                groups = _speech_groups_of(audio)
+                if len(groups) > 1:
+                    runs = _split_runs(model, audio, groups)
+                else:       # one stretch: one check, shared with the transcription
+                    language = pick_language(_clip_language(model, audio))
+            elif language is None:
+                probs = _clip_language(model, audio)
+                language = max(probs, key=probs.get)
+                detected = probs[language]
+        except Exception as e:  # noqa: BLE001 -- a failed check must not lose the transcript
+            print(f"language check: {type(e).__name__}: {e}", file=sys.stderr)
+            runs, language = [], ("en" if language == SPLIT else language)
         if len({r[0] for r in runs}) > 1:
             parts, words = [], []
             for lg, a, b in runs:
@@ -313,7 +378,9 @@ def transcribe(path: str, *, verbatim: bool = True, model_name: str = DEFAULT_MO
             one = runs[0][0] if runs else ("en" if language == SPLIT else language)
             text, words, info = _decode(model, audio, one, verbatim, hot)
             parts = [Part(info.language, 0.0, float(info.duration), text)]
-            duration, lang, prob = float(info.duration), info.language, float(info.language_probability)
+            duration, lang = float(info.duration), info.language
+            prob = float(info.language_probability) if detected is None else detected
+        model.encode.forget()
     if spoken_numbers:
         import textprep
 

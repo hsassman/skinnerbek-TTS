@@ -87,8 +87,10 @@ LANGUAGES = [
 CFG = SimpleNamespace(device="cpu", offline=False, low_memory=False, chunk_size=1,
                       threads=None, dtype="auto", mock=False)
 
-# One loaded model at a time (8 GB box). Keyed by (kind, size, dtype_name).
+# One loaded model at a time (8 GB box). Keyed by (kind, size); the precision
+# it was loaded with is in _LOADED, decided once at load time.
 _CACHE: dict = {}
+_LOADED = {"dtype": None}
 # Gradio runs each event listener in its own worker, so model use is serialised here.
 _MODEL_LOCK = threading.RLock()
 
@@ -259,8 +261,10 @@ def get_model(kind: str, size: str):
 
 
 def _get_model(kind: str, size: str):
-    dtype = resolve_dtype(CFG.device, size, CFG.dtype, low_memory=_low_memory())
-    key = (kind, size, str(dtype))
+    # A loaded model is kept as it is. Free RAM is low *because* it is loaded, so
+    # re-deciding the precision per take used to swap a fast float32 model for an
+    # emulated bfloat16 one (about 7x slower) on the second take.
+    key = (kind, size)
     if key in _CACHE:
         return _CACHE[key]
     # The speech recogniser (~1 GB) and a voice model don't both fit on 8 GB.
@@ -272,9 +276,13 @@ def _get_model(kind: str, size: str):
         _CACHE[key] = MockTTSModel(kind, size)
         return _CACHE[key]
 
+    # Free the old model first, so the precision is chosen from the RAM this
+    # load will really have.
     if _CACHE:
         _CACHE.clear()
+        _LOADED["dtype"] = None
         gc.collect()
+    dtype = resolve_dtype(CFG.device, size, CFG.dtype, low_memory=_low_memory())
 
     args = SimpleNamespace(
         device=CFG.device,
@@ -287,7 +295,16 @@ def _get_model(kind: str, size: str):
     # Raises SystemExit if it can't fit in RAM; callers catch that.
     model = load_model(kind, args)
     _CACHE[key] = model
+    _LOADED["dtype"] = _model_dtype(model) or str(dtype).split(".")[-1]
     return model
+
+
+def _model_dtype(model) -> Optional[str]:
+    """The precision the loaded weights really have ("float32", "bfloat16")."""
+    try:
+        return str(next(model.model.parameters()).dtype).split(".")[-1]
+    except Exception:
+        return None
 
 
 # --- Machine report: dtype, bf16 support and measured speed ------------------
@@ -311,7 +328,7 @@ def _speed_phrase(spf: Optional[float]) -> str:
 def _system_detail_html() -> str:
     """The same facts as the header chips, laid out for reading rather than
     glancing -- Settings is where you go to understand a number, not spot it."""
-    r = system_report()
+    r = system_report(_LOADED["dtype"])
     spf = r.get("sec_per_frame")
     free, total = r.get("free_gb"), r.get("total_gb")
     rows = [
@@ -324,7 +341,7 @@ def _system_detail_html() -> str:
         ("Weight precision in use", str(r.get("dtype", "?"))),
         ("Memory", f"{free:.2f} GB free of {total:.2f} GB" if free and total else "unknown"),
         ("Measured speed", _speed_phrase(spf) +
-         (f" (median of {speed_sample_count()} lines)" if spf else "")),
+         (f" (median of {speed_sample_count(_LOADED["dtype"])} lines)" if spf else "")),
     ]
     body = "".join(
         f'<tr><th scope="row">{escape(k)}</th><td>{escape(v)}</td></tr>' for k, v in rows
@@ -333,12 +350,13 @@ def _system_detail_html() -> str:
 
 
 def _system_html() -> str:
-    r = system_report()
+    r = system_report(_LOADED["dtype"])
     free, total = r.get("free_gb"), r.get("total_gb")
     dtype = r.get("dtype", "?")
 
     # Amber, not red: low RAM and the bf16 path make runs slow, not broken.
-    ram_tone = "warn" if (free or 0) < 3.2 else "ok"
+    # With a model in memory, low free RAM is expected: it is where the model is.
+    ram_tone = "warn" if (free or 0) < 3.2 and not _LOADED["dtype"] else "ok"
     chips = [
         _stat("CPU", f"{r.get('cores') or '?'} cores / {r.get('threads') or '?'} threads"),
         _stat("Vector unit", str(r.get("simd", "?"))),
@@ -549,7 +567,7 @@ def _run_synth(kind: str, p: dict, lines: List[str], events: "queue.Queue",
         audio = len(wav) / float(sr or 24000)
         # Calibrates time estimates (not from the mock model).
         if not CFG.mock:
-            record_speed(seconds, audio * 12.0)
+            record_speed(seconds, audio * 12.0, dtype_name=_LOADED["dtype"])
         events.put({"i": i, "seconds": seconds, "audio": audio, "path": str(path)})
 
     events.put({"phase": "loading"})
@@ -647,6 +665,9 @@ def _stitch_done(kind, params, lines, gaps, done) -> Tuple[str, dict, Any]:
     return _finish(kind, params, lines[:n], gaps[:n], sr, parts)
 
 
+_FIX_HINT = "<br>Not happy with one line? Use <strong>Fix one line</strong> below to redo just that one."
+
+
 def _stream(kind: str, params: dict, lines: List[str], gaps: List[int], seed, note: str = ""):
     """Run one generation on a worker thread, yielding live progress to the browser."""
     _seeded(seed)
@@ -720,8 +741,7 @@ def _stream(kind: str, params: dict, lines: List[str], gaps: List[int], seed, no
     path, state, redo = _finish(kind, params, lines, gaps, sr, parts)
     n = len(lines)
     total = time.time() - started
-    extra = ("<br>Not happy with one line? Use <strong>Fix one line</strong> below to redo just that one."
-             if n > 1 else "")
+    extra = _FIX_HINT if n > 1 else ""
     yield (path,
            _progress_html(lines, done, started, "done"),
            f'<div class="tts-note tts-note--ok"><strong>Done</strong> &mdash; {n} line'
@@ -753,7 +773,7 @@ def do_preview(script, tidy, gap_ms, para_gap):
     except Exception as e:  # noqa: BLE001
         return f'<div class="tts-note tts-note--warn">Nothing to preview: {escape(str(e))}</div>'
 
-    eta = estimate_seconds(lines)
+    eta = estimate_seconds(lines, _LOADED["dtype"])
     n = len(lines)
     head = f"<strong>{n} line{'s' if n != 1 else ''}</strong> will be generated"
     head += f", roughly <strong>{_fmt_dur(eta)}</strong> at this machine's measured speed." if eta \
@@ -1292,7 +1312,8 @@ def do_clone_try(name, script, delivery):
     gap = int(((voice_meta(name) or {}).get("profile") or {}).get("gap_ms", 300))
     for audio, prog, status, _state, _redo in do_speak(
             f"voice:{name}", script, "0.6B", "Auto", "", delivery, True, gap, 650, 0):
-        yield audio, prog, status
+        # This card has no Fix one line panel, so don't point at one.
+        yield audio, prog, (status.replace(_FIX_HINT, "") if isinstance(status, str) else status)
 
 
 def do_pick_voice(name):
@@ -1666,7 +1687,8 @@ def build_app() -> gr.Blocks:
                                     list(ASR_LANGUAGE), value="English and Afrikaans",
                                     label="Language spoken in the clip",
                                     info="English and Afrikaans writes each part in the language "
-                                         "it is spoken in.")
+                                         "it is spoken in. English is quicker for a clip with long "
+                                         "pauses and no Afrikaans.")
                                 a_redo = gr.Button("Transcribe again", variant="secondary", size="sm")
 
                         with gr.Column(elem_classes="tts-card", elem_id="tts-save-card"):
