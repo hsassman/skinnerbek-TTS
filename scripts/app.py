@@ -816,17 +816,19 @@ def do_design(description, script, language, delivery, tidy, gap_ms, para_gap, s
 
 
 def do_regen_line(state, which, seed):
-    """Regenerate a single line of the last take and re-stitch the whole read."""
+    """Regenerate a single line of the last take and re-stitch the whole read.
+    Returns (audio, repair status, state, take status)."""
     try:
         if not state:
-            return gr.update(), "Generate something first, or restore a take in Settings.", state
+            return (gr.update(), "Generate something first, or restore a take in Settings.", state,
+                    gr.update())
         lines = state["lines"]
         try:
             idx = int(which)
         except (TypeError, ValueError):
-            return gr.update(), "Pick which line to redo.", state
+            return gr.update(), "Pick which line to redo.", state, gr.update()
         if not 0 <= idx < len(lines):
-            return gr.update(), "That line isn't in the last take.", state
+            return gr.update(), "That line isn't in the last take.", state, gr.update()
 
         _seeded(seed)
         events: "queue.Queue" = queue.Queue()
@@ -847,9 +849,16 @@ def do_regen_line(state, which, seed):
         return (str(joined),
                 f"Redid line {idx + 1} and re-stitched {len(parts)} lines. "
                 f"Saved to `{joined}`",
-                new_state)
+                new_state,
+                f'<div class="tts-note tts-note--ok"><strong>Line {idx + 1} redone.</strong> The '
+                f"take was re-stitched.<br>Saved to <code>{escape(str(joined))}</code></div>")
     except (Exception, SystemExit) as e:  # noqa: BLE001
-        return gr.update(), f"**Could not regenerate.** {type(e).__name__}: {e}", state
+        return gr.update(), f"**Could not regenerate.** {type(e).__name__}: {e}", state, gr.update()
+
+
+def _fix_ready(state):
+    """'Regenerate this line' only works once there is a take to fix."""
+    return gr.update(interactive=bool(state))
 
 
 def _hue(name: str) -> int:
@@ -1563,7 +1572,7 @@ def _fix_one_line_block():
         new_seed = gr.Number(label="Seed", precision=0, value=0,
                              info="0 gives a fresh attempt each time. Any other number is repeatable.")
         with gr.Row(elem_classes="tts-actions"):
-            btn = gr.Button("Regenerate this line", variant="primary")
+            btn = gr.Button("Regenerate this line", variant="primary", interactive=False)
         status = gr.Markdown(elem_classes="tts-status")
     return line, new_seed, btn, status
 
@@ -1792,7 +1801,10 @@ def build_app() -> gr.Blocks:
                 preview_btn.click(do_preview, inputs=[script, tidy, gap_ms, para_gap],
                                   outputs=[preview_md])
                 redo_btn.click(do_regen_line, inputs=[speak_state, redo_line, redo_seed],
-                               outputs=[audio, redo_status, speak_state])
+                               outputs=[audio, redo_status, speak_state, status])
+                # A new take makes an earlier repair message stale.
+                speak_btn.click(lambda: "", outputs=[redo_status], queue=False)
+                speak_state.change(_fix_ready, inputs=[speak_state], outputs=[redo_btn], queue=False)
 
             # ================= My voices =================
             with gr.Tab("My voices", id="voices") as voices_tab:
@@ -1886,7 +1898,9 @@ def build_app() -> gr.Blocks:
                 d_preview_btn.click(do_preview, inputs=[d_script, d_tidy, d_gap, d_para_gap],
                                     outputs=[d_preview_md])
                 d_redo_btn.click(do_regen_line, inputs=[d_state, d_redo_line, d_redo_seed],
-                                 outputs=[d_audio, d_redo_status, d_state])
+                                 outputs=[d_audio, d_redo_status, d_state, d_status])
+                d_btn.click(lambda: "", outputs=[d_redo_status], queue=False)
+                d_state.change(_fix_ready, inputs=[d_state], outputs=[d_redo_btn], queue=False)
 
             # ================= Recordings =================
             with gr.Tab("Recordings", id="recordings") as rec_tab:
@@ -1972,6 +1986,7 @@ def build_app() -> gr.Blocks:
                 sess_refresh.click(do_refresh_sessions, outputs=[sess_list])
                 sess_restore.click(do_restore_session, inputs=[sess_list],
                                    outputs=[speak_state, redo_line, sess_status, sess_list])
+                sess_restore.click(lambda: "", outputs=[redo_status], queue=False)
                 lex_reload.click(do_load_lexicon, outputs=[lex_box])
                 lex_save.click(do_save_lexicon, inputs=[lex_box], outputs=[lex_status])
                 clean_dry.click(lambda: do_cleanup(dry_run=True), outputs=[clean_status])

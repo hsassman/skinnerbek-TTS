@@ -666,14 +666,18 @@ kbd {
   border-color: var(--tts-border) !important; box-shadow: var(--tts-shadow-sm) !important;
 }
 .gradio-container .tts-seg label:has(input:focus-visible) { outline: 3px solid var(--tts-accent); outline-offset: 2px; }
+/* The segment carries the ring, not the radio hidden inside it. */
+.gradio-container .tts-seg label input:focus-visible { outline: none !important; box-shadow: none !important; }
 
 /* Inputs: a visible 3:1 boundary and one focus treatment. */
 .gradio-container .tts-card :is(textarea, input[type="text"], input[type="number"], input[role="listbox"], .wrap-inner) {
   border-color: var(--tts-ui-border);
 }
 .gradio-container input[type="checkbox"] { accent-color: var(--tts-accent); cursor: pointer; }
-/* Not a dropdown's inner input: its outer .wrap carries the ring (see below). */
-.gradio-container :is(input:not([role="listbox"]), textarea):focus {
+/* Fields you type in only. A dropdown's outer .wrap carries its ring (see below);
+   checkboxes, radios and sliders already get the focus-visible outline, and the
+   glow on top of it read as a second ring. */
+.gradio-container :is(input:not([role="listbox"], [type="checkbox"], [type="radio"], [type="range"]), textarea):focus {
   border-color: var(--tts-accent) !important;
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--tts-accent) 20%, transparent) !important;
 }
