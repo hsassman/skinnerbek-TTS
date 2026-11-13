@@ -291,6 +291,21 @@ def model_id(kind: str, size: str) -> str:
 
 _KIND_WORDS = {"Base": "voice-cloning", "CustomVoice": "built-in voices", "VoiceDesign": "voice design"}
 
+# Download sizes, for telling people what a missing model would cost.
+MODEL_GB = {"0.6B": "2.5", "1.7B": "4.5"}
+
+
+def model_installed(kind: str, size: str) -> bool:
+    """True when this checkpoint is already in the local Hugging Face cache."""
+    try:
+        repo = model_id(kind, size)
+        from huggingface_hub import try_to_load_from_cache
+
+        return all(isinstance(try_to_load_from_cache(repo, f), str)
+                   for f in ("config.json", "model.safetensors"))
+    except Exception:
+        return False
+
 
 def load_model(kind: str, args: argparse.Namespace):
     """Load a Qwen3TTSModel, printing what's happening since CPU loads are slow."""
@@ -325,7 +340,7 @@ def load_model(kind: str, args: argparse.Namespace):
         from huggingface_hub import try_to_load_from_cache
 
         if not isinstance(try_to_load_from_cache(repo, "config.json"), str):
-            gb = "2.5" if args.model_size == "0.6B" else "4.5"
+            gb = MODEL_GB.get(args.model_size, "4.5")
             raise SystemExit(
                 f"The {args.model_size} {_KIND_WORDS.get(kind, kind)} model ({repo}) isn't downloaded "
                 f"on this computer yet, and offline mode is on. Start once without --offline to "

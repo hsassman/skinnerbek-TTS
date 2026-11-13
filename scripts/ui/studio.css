@@ -1104,3 +1104,144 @@ body:not(.dark) .tts-head :focus-visible { outline-color: var(--tts-accent) !imp
   .tts-textbtn span { display: none; }
   .tts-textbtn { width: 44px; padding: 0 !important; justify-content: center; }
 }
+
+/* ===========================================================================
+   Guidance: coach line, next/waiting cards, busy runs, tooltips, tips
+   =========================================================================== */
+/* The Clone tab's "what to do next" line. */
+.tts-coach {
+  display: flex; align-items: center; gap: var(--tts-s4);
+  padding: var(--tts-s4) var(--tts-s5); margin: 0 0 var(--tts-s5);
+  border-radius: var(--tts-r); border: 1px solid var(--tts-border);
+  background: var(--tts-surface); box-shadow: var(--tts-shadow);
+  animation: tts-rise .3s var(--tts-ease) backwards;
+}
+.tts-coach > div { display: grid; gap: 2px; min-width: 0; }
+.tts-coach b { font-size: var(--tts-fs-md); color: var(--tts-text); font-weight: 700; }
+.tts-coach span { color: var(--tts-muted); font-size: var(--tts-fs-sm); line-height: 1.5; }
+.tts-coach span b { font-size: inherit; font-weight: 650; }
+.tts-coach__ico {
+  flex: none; width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center;
+  background: var(--tts-accent-weak); color: var(--tts-accent);
+}
+.gradio-container .tts-coach__ico svg { width: 20px; height: 20px; }
+.gradio-container .tts-coach__ico svg, .gradio-container .tts-coach__ico svg * { color: inherit !important; stroke: currentColor !important; fill: none !important; }
+.tts-coach--listening .tts-coach__ico, .tts-coach--creating .tts-coach__ico { animation: tts-breathe 1.6s ease-in-out infinite; }
+.tts-coach--ready .tts-coach__ico { background: var(--tts-ok-weak); color: var(--tts-ok); }
+.tts-coach--nospeech .tts-coach__ico { background: var(--tts-warn-weak); color: var(--tts-warn); }
+.gradio-container #tts-coach { padding: 0 !important; border: 0 !important; background: transparent !important; }
+.gradio-container #tts-coach .html-container { padding: 0 !important; }
+
+/* The card to use next glows; cards that can't be used yet are greyed out. */
+.gradio-container .tts-card.tts-next {
+  border-color: color-mix(in srgb, var(--tts-accent) 55%, var(--tts-border)) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--tts-accent) 16%, transparent), var(--tts-shadow) !important;
+  transition: box-shadow .25s ease, border-color .25s ease;
+}
+.gradio-container .tts-card.tts-wait {
+  position: relative; opacity: .5; filter: grayscale(.6); pointer-events: none; user-select: none;
+  transition: opacity .25s ease, filter .25s ease;
+}
+.gradio-container .tts-card.tts-wait::after {
+  content: "Not ready yet"; position: absolute; top: -11px; right: var(--tts-s5);
+  border: 1px solid var(--tts-border);
+  font-size: var(--tts-fs-xs); font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  padding: 3px 10px; border-radius: var(--tts-r-pill); background: var(--tts-surface-3); color: var(--tts-muted);
+}
+
+/* A run in progress: the button spins, its card and the result card pulse. */
+.gradio-container button.tts-go.tts-busy {
+  opacity: 1 !important; cursor: progress !important;
+  background-size: 200% 100% !important; animation: tts-shimmer 2.4s linear infinite;
+}
+.gradio-container button.tts-go.tts-busy::before {
+  content: ""; width: 16px; height: 16px; margin-right: 10px; flex: none; border-radius: 50%;
+  border: 2px solid currentColor; border-right-color: transparent; animation: tts-spin .8s linear infinite;
+}
+@keyframes tts-ring {
+  0%, 100% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--tts-accent) 18%, transparent), var(--tts-shadow); }
+  50%      { box-shadow: 0 0 0 5px color-mix(in srgb, var(--tts-accent) 28%, transparent), var(--tts-shadow); }
+}
+.gradio-container .tts-card.tts-card--busy, .gradio-container .tts-card.tts-card--output {
+  border-color: color-mix(in srgb, var(--tts-accent) 50%, var(--tts-border)) !important;
+  animation: tts-ring 2s ease-in-out infinite;
+}
+
+/* Model sizes this computer doesn't have: visible, locked, explained on hover. */
+.gradio-container .tts-seg label.tts-seg__off {
+  opacity: .5; cursor: not-allowed !important; background: transparent !important;
+  border: 1px dashed var(--tts-ui-border) !important; box-shadow: none !important;
+}
+.gradio-container .tts-seg label.tts-seg__off:hover { color: inherit !important; background: transparent !important; }
+
+/* "Runs on" badge beside a card title. */
+.tts-mchip {
+  display: inline-flex; align-items: center; gap: 4px; margin-left: var(--tts-s3); vertical-align: 3px;
+  padding: 2px 9px 2px 7px; border-radius: var(--tts-r-pill); font-size: var(--tts-fs-xs);
+  font-weight: 700; letter-spacing: .02em; white-space: nowrap; cursor: help;
+}
+.gradio-container .tts-mchip svg { width: 12px; height: 12px; }
+.gradio-container .tts-mchip svg, .gradio-container .tts-mchip svg * { color: inherit !important; stroke: currentColor !important; fill: none !important; }
+.tts-mchip--ok  { background: var(--tts-ok-weak); color: var(--tts-ok); }
+.tts-mchip--off { background: var(--tts-surface-3); color: var(--tts-muted); }
+
+/* A whole feature whose model isn't installed. */
+.tts-locked {
+  display: flex; gap: var(--tts-s4); align-items: flex-start; margin: 0 0 var(--tts-s5);
+  padding: var(--tts-s4) var(--tts-s5); border-radius: var(--tts-r); border: 1px dashed var(--tts-ui-border);
+  background: var(--tts-surface-2); color: var(--tts-muted);
+}
+.tts-locked > div { display: grid; gap: 2px; }
+.tts-locked > div > b { color: var(--tts-text); font-size: var(--tts-fs-md); }
+.tts-locked span b { color: var(--tts-text); font-weight: 650; }
+.gradio-container .tts-bare { padding: 0 !important; border: 0 !important; background: transparent !important; }
+.gradio-container .tts-bare .html-container { padding: 0 !important; }
+.tts-locked span { font-size: var(--tts-fs-sm); line-height: 1.5; }
+.gradio-container .tts-locked > svg { width: 22px; height: 22px; flex: none; margin-top: 2px; }
+.gradio-container .tts-locked > svg, .gradio-container .tts-locked > svg * { color: var(--tts-muted) !important; stroke: currentColor !important; fill: none !important; }
+
+/* Tab badge for a tab whose model isn't installed. */
+.tts-tabflag {
+  margin-left: 6px; padding: 1px 6px; border-radius: var(--tts-r-pill); font-size: 10px; font-weight: 750;
+  letter-spacing: .03em; background: var(--tts-surface-3); color: var(--tts-muted); vertical-align: 1px;
+}
+
+/* Floating tooltip (one element, positioned by studio.js). */
+.tts-tip {
+  position: fixed; z-index: 10000; max-width: 280px; padding: 8px 11px; border-radius: 9px;
+  background: var(--tts-ink); color: #f4f6fb; font-size: 13px; line-height: 1.45; font-weight: 500;
+  box-shadow: 0 8px 24px rgba(10,14,24,.28); pointer-events: none;
+  opacity: 0; transform: translateY(4px); transition: opacity .14s ease, transform .14s ease;
+}
+.tts-tip.is-on { opacity: 1; transform: none; }
+.dark .tts-tip { background: #f4f6fb; color: #171a26; }
+[data-tip] { cursor: help; }
+button[data-tip], label[data-tip], .tts-tabs [data-tip] { cursor: pointer; }
+
+/* Rotating tip line under the Speak button. */
+.tts-tips {
+  display: flex; align-items: center; justify-content: center; gap: var(--tts-s2); min-height: 22px;
+  font-size: var(--tts-fs-sm); color: var(--tts-faint); text-align: center;
+}
+.gradio-container .tts-tips svg { width: 14px; height: 14px; flex: none; }
+.gradio-container .tts-tips svg, .gradio-container .tts-tips svg * { color: var(--tts-accent) !important; stroke: currentColor !important; fill: none !important; }
+.tts-tips span { transition: opacity .2s ease; }
+.tts-tips span.is-out { opacity: 0; }
+
+/* Two-language transcripts, side by side. */
+.gradio-container .tts-langs {
+  gap: var(--tts-s4) !important; padding: var(--tts-s4) !important; border-radius: var(--tts-r-sm) !important;
+  background: var(--tts-surface-2) !important; border: 1px solid var(--tts-border) !important;
+  animation: tts-rise .3s var(--tts-ease) backwards;
+}
+.gradio-container .tts-langs:not(:has(.tts-langs__head[data-on="true"])) { display: none !important; }
+.tts-langs__head { display: grid; gap: 2px; }
+.tts-langs__head b { color: var(--tts-text); font-size: var(--tts-fs-md); }
+.tts-langs__head span { color: var(--tts-muted); font-size: var(--tts-fs-sm); }
+.gradio-container .tts-langs__row { gap: var(--tts-s4) !important; flex-wrap: wrap !important; }
+.gradio-container .tts-langs__row > .block { min-width: 220px !important; }
+
+@media (prefers-reduced-motion: reduce) {
+  .gradio-container .tts-card.tts-card--busy, .gradio-container .tts-card.tts-card--output,
+  .gradio-container button.tts-go.tts-busy, .tts-coach__ico { animation: none !important; }
+}

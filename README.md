@@ -570,7 +570,20 @@ dawn over Table Mountain), and **Ctrl+Enter** renders from the Speak or Design t
   - **Your voice at a glance** shows pitch, range, pace, pauses, fillers and clarity, a pitch
     contour, and the delivery and pause it will use for this voice.
   - Name it, press **Create my voice**, and **Hear your new voice** unlocks: type anything and
-    press Speak. The name is suggested from the file name.
+    press Speak. The name is suggested from the file name; a new clip never keeps the name of
+    a voice that is already saved (it gets the new file's name, numbered if taken).
+  - A **coach line** above the cards says what to do next. The card to use next is outlined,
+    and cards that can't be used yet are greyed out with "Not ready yet" until the step before
+    finishes. A running button spins and its result card pulses.
+  - When a clip has both **English and Afrikaans**, each language gets its own transcript box,
+    and **Make the voice from** picks both, English only or Afrikaans only (one language uses
+    only its parts of the clip, with its own transcript).
+- **Help everywhere**: hover over or tab to a control for a short explanation; Speak shows a
+  rotating tip under its button.
+- **Models this computer doesn't have** stay visible but locked: the 1.7B options read
+  "not installed" and explain on hover, the style instruction is disabled, and **Design a
+  voice** (1.7B only) shows a banner and a badge on its tab. Cards say which model they run on
+  ("0.6B · ready"). The app never starts a model download from a click.
 
 - **Speak**: write a script or start from a sample, pick a voice, press **Speak**.
   - A live counter shows words, sentences and roughly how long the read will be.
