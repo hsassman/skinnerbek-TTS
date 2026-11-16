@@ -642,18 +642,28 @@ re-run with it (11.9 % → 8.5 %, and 0 %); the other two weren't re-run. Turbo 
 confidently wrong ("light train" for "late train" at 98 % confidence), which is why the app
 asks for a read-through even when nothing is highlighted.
 
-**English and Afrikaans in one clip.** The default language setting checks each stretch of
-speech separately and writes it in the language it is spoken in, instead of forcing one
-language on the whole clip (which renders the other language's speech as a translation).
-Whisper's whole-clip auto-detect labelled Cape Town English as Afrikaans, and one 2-second
-English stretch scored 0.54 Afrikaans, so a stretch counts as Afrikaans only at 0.75 or
-more. When both languages are heard, a **Show** picker shows one language's transcript;
-choosing one also builds the voice from only those parts of the clip, so audio and words
-still match. A clip that is one continuous stretch is checked and transcribed in a single
-recogniser pass (34 s for a 9 s clip on the 8 GB test machine, the same as forcing English).
-A clip with pauses of a second or more pays one extra pass per stretch (a 16 s clip with two
-stretches: 95 s against 34 s), so pick *English* for an all-English clip with long pauses.
-This has been checked on English clips only so far: no bilingual clip is in the repo yet.
+**English and Afrikaans in one clip.** The default language setting writes each sentence in
+the language it is spoken in, instead of forcing one language on the whole clip (which turns
+the other language's speech into a translation or gibberish). It works like this:
+
+1. One language check over the clip. Under a 2 % Afrikaans score a clip of up to 28 s is
+   treated as English only and transcribed once (all-English test clips scored under 0.5 %).
+2. Otherwise the clip is written out twice from the same recogniser pass, once as English
+   and once as Afrikaans. The Afrikaans write-up gets both languages right; the English one
+   turns Afrikaans into nonsense.
+3. Each sentence is assigned a language from its small words (*die, nie, wat, 'n* against
+   *the, and, that, a*), with the two write-ups' confidence as the tie-breaker, and takes its
+   text from the matching write-up. A switch needs no pause.
+
+An earlier version split only at pauses and asked for a 75 % Afrikaans score. On a real
+bilingual demo reel (25 s, English then Afrikaans) a stretch that ran from one language into
+the other scored 49 % English against 44 % Afrikaans, was written as English, and came out as
+"A stem wat dajlikajt im wysi en intensi draa". The sentence-level version writes that clip
+as 12.7 s of English and 11.4 s of correct Afrikaans. That is one bilingual clip: it is the
+only one tested. When both languages are heard, each gets its own transcript box, and
+**Make the voice from** picks both, English only or Afrikaans only. Afrikaans spelling is as
+good as Whisper large-v3-turbo's (it wrote *emotie* for *emosie*); check the Afrikaans box
+before creating the voice.
 
 Most remaining "errors" are spelling choices (Bancorp vs Bank Corp, HTD-189 vs HTD189), and
 at least one disagreement may be the hand-typed reference rather than the recogniser. Four

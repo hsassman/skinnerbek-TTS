@@ -34,16 +34,35 @@ _CLEAN_PROMPT = "Hello, welcome. It's a lekker day in Cape Town."
 _PROMPTS = {"af": ("Uhm, so, ek was, hmm, jy weet... Okay. Reg, ja.",
                    "Hallo, welkom. Dis 'n lekker dag in Kaapstad.")}
 
-# Split mode: each stretch of speech is checked for English or Afrikaans.
+# Split mode: the clip is written out once as English and once as Afrikaans,
+# and each sentence keeps the version in its own language.
 SPLIT = "split"
 SPLIT_LANGUAGES = ("en", "af")
-# Cape Town English often scores ~0.5 Afrikaans, so Afrikaans must be clear-cut.
-AF_SURE = 0.75
-# Speech shorter than this is too little to tell; it joins its neighbour's language.
-MIN_DETECT_S = 2.0
-# Stretches closer than this are checked together (one check costs a model pass).
-JOIN_GAP_S = 1.0
-JOIN_MAX_S = 12.0
+# Below this whole-clip Afrikaans score a short clip is treated as English only
+# and the Afrikaans pass is skipped. A real clip that was half Afrikaans scored
+# 0.44, an all-English one under 0.005.
+AF_POSSIBLE = 0.02
+# The whole-clip score only covers the first 30 seconds of speech.
+LANGUAGE_WINDOW_S = 28.0
+# With no telling words in a sentence, Afrikaans has to be this much more
+# confident than English to win.
+AF_MARGIN = 0.10
+
+# Small words that only one of the two languages uses. Shared spellings
+# (is, was, in, of, as, by, my, so, want, word, hand, water) are left out.
+_AF_WORDS = frozenset("""
+'n die nie en het van om te wat vir ek jy jou ons dit met op aan sal kan moet ook maar
+hulle baie nou hier daar sy hy dan toe nog uit oor na tot wees gaan kom weet dink maak goed
+mense jaar dag tyd elke alles niks iets julle hierdie daardie waar hoe wie hoekom omdat
+terwyl tussen onder agter voor sonder deur saam ja nee dis net soos geen meer jul haar hom
+""".split())
+_EN_WORDS = frozenset("""
+the and to a that it you for with this have are not but they from your we there their what
+will would about which when can more an been has had were who do does did i i'm it's don't
+just know get like how our out up them than then into only every because behind there's
+make makes she he his her its these those where why while between under after before
+without through together yes no isn't doesn't can't that's here all very now people good
+""".split())
 
 FILLERS = {"um", "umm", "uh", "uhm", "er", "erm", "ah", "hmm", "mm", "mhm"}
 
@@ -69,6 +88,7 @@ class Part:
     start: float
     end: float
     text: str
+    words: List["Word"] = field(default_factory=list)
 
 
 @dataclass
@@ -177,24 +197,25 @@ def _get_model(name: str, offline: bool):
 
 
 def _remember_last_encode(model) -> None:
-    """Keep the most recent encoder pass so the same audio isn't encoded twice.
+    """Keep recent encoder passes so the same audio isn't encoded twice.
 
-    The encoder is most of the cost on a CPU. A language check and the
-    transcription that follows encode the same 30-second window, so the second
-    call returns the first one's result."""
+    The encoder is most of the cost on a CPU. A language check, an English
+    pass and an Afrikaans pass all encode the same 30-second windows, so the
+    repeats return the first one's result. Three windows cover a 60 s clip."""
     import hashlib
 
     real = model.encode
-    last: dict = {}
+    kept: dict = {}
 
     def encode(features):
         key = (features.shape, hashlib.sha1(np.ascontiguousarray(features).tobytes()).digest())
-        if last.get("key") != key:
-            last.clear()
-            last.update(key=key, out=real(features))
-        return last["out"]
+        if key not in kept:
+            while len(kept) >= 3:
+                kept.pop(next(iter(kept)))
+            kept[key] = real(features)
+        return kept[key]
 
-    encode.forget = last.clear
+    encode.forget = kept.clear
     model.encode = encode
 
 
@@ -234,40 +255,116 @@ def lexicon_hotwords(lexicon_path: Optional[Path]) -> str:
     return " ".join(out[:40])
 
 
-def pick_language(probs: dict) -> str:
-    """English unless Afrikaans is clearly ahead (see AF_SURE)."""
-    af, en = probs.get("af", 0.0), probs.get("en", 0.0)
-    return "af" if af >= AF_SURE and af > en else "en"
+def _plain(word: str) -> str:
+    """A word as the language lists spell it: lower case, bare, 'n kept."""
+    w = word.strip().lower().replace("\u2019", "'").replace("\u02bc", "'").replace("\u0149", "'n")
+    w = w.strip(".,!?;:\"()[]\u2026\u201c\u201d-")
+    return w
 
 
-def speech_groups(chunks: List[tuple]) -> List[tuple]:
-    """(start, end) speech stretches in seconds, near neighbours joined so
-    fewer language checks are needed."""
-    out: List[list] = []
-    for a, b in chunks:
-        if out and a - out[-1][1] < JOIN_GAP_S and b - out[-1][0] <= JOIN_MAX_S:
-            out[-1][1] = b
-        else:
-            out.append([a, b])
-    return [tuple(g) for g in out]
+def text_language(text: str) -> Optional[str]:
+    """"af", "en", or None when the small words don't settle it."""
+    af = en = 0
+    for raw in text.split():
+        w = _plain(raw)
+        af += w in _AF_WORDS
+        en += w in _EN_WORDS
+    if af == en:
+        return None
+    return "af" if af > en else "en"
 
 
-def language_runs(groups: List[tuple], langs: List[Optional[str]]) -> List[tuple]:
-    """(language, start, end) runs. A group with no language (too short to
-    tell) takes its neighbour's, and touching groups of one language merge."""
-    langs = list(langs)
+def sentences(words: List[Word], max_gap: float = 1.0) -> List[List[Word]]:
+    """Words grouped into sentences: a full stop, question or exclamation mark
+    ends one, and so does a pause longer than `max_gap` seconds."""
+    out: List[List[Word]] = []
+    cur: List[Word] = []
+    for w in words:
+        if cur and w.start - cur[-1].end > max_gap:
+            out.append(cur)
+            cur = []
+        cur.append(w)
+        if w.text.rstrip("\"')\u201d").endswith((".", "!", "?", "\u2026")):
+            out.append(cur)
+            cur = []
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _between(words: List[Word], start: float, end: float) -> List[Word]:
+    """The words whose middle falls in [start, end)."""
+    return [w for w in words if start <= (w.start + w.end) / 2 < end]
+
+
+def _sure(words: List[Word]) -> float:
+    return float(np.mean([w.prob for w in words])) if words else 0.0
+
+
+def sentence_language(af_sentence: List[Word], en_words: List[Word]) -> Optional[str]:
+    """Which language one sentence is in, from the two write-ups of it.
+
+    `af_sentence` is the sentence as the Afrikaans pass wrote it; `en_words`
+    is what the English pass wrote for the same seconds. The Afrikaans pass
+    writes English speech as English, so its small words usually settle it.
+    None means undecided (the caller uses the neighbouring sentence)."""
+    said_af = " ".join(w.text for w in af_sentence)
+    said_en = " ".join(w.text for w in en_words)
+    lang = text_language(said_af)
+    if lang == "en":
+        return "en"
+    sure_af, sure_en = _sure(af_sentence), _sure(en_words)
+    if lang == "af":
+        # Guard: Afrikaans words for English speech (a translation) while the
+        # English pass heard plain English just as confidently.
+        if text_language(said_en) == "en" and sure_en >= sure_af + AF_MARGIN:
+            return "en"
+        return "af"
+    if sure_af >= sure_en + AF_MARGIN:
+        return "af"
+    if sure_en >= sure_af + AF_MARGIN:
+        return "en"
+    return None
+
+
+def split_by_sentence(af_words: List[Word], en_words: List[Word]) -> List[Part]:
+    """Parts in spoken order, each one language, from the two passes' words.
+
+    Afrikaans parts take the Afrikaans pass's words, English parts the English
+    pass's words for the same seconds."""
+    sents = sentences(af_words)
+    if not sents:
+        return []
+    langs: List[Optional[str]] = []
+    for i, sent in enumerate(sents):
+        start = sent[0].start if i else 0.0
+        end = sents[i + 1][0].start if i + 1 < len(sents) else float("inf")
+        langs.append(sentence_language(sent, _between(en_words, start, end)))
     known = [lg for lg in langs if lg]
     fill = known[0] if known else "en"
     for i, lg in enumerate(langs):
         if lg is None:
             langs[i] = langs[i - 1] if i else fill
+
+    # Runs of one language, as (language, first sentence, last sentence).
     runs: List[list] = []
-    for (a, b), lg in zip(groups, langs):
+    for i, lg in enumerate(langs):
         if runs and runs[-1][0] == lg:
-            runs[-1][2] = b
+            runs[-1][2] = i
         else:
-            runs.append([lg, a, b])
-    return [tuple(r) for r in runs]
+            runs.append([lg, i, i])
+    parts: List[Part] = []
+    for n, (lg, first, last) in enumerate(runs):
+        own = [w for sent in sents[first:last + 1] for w in sent]
+        start = own[0].start if n else 0.0
+        end = sents[last + 1][0].start if last + 1 < len(sents) else float("inf")
+        chosen = own if lg == "af" else (_between(en_words, start, end) or own)
+        said = _tidy(" ".join(w.text for w in chosen))
+        if lg == "af":
+            # Whisper writes the article 'n as "A"; Afrikaans has no word "a".
+            said = re.sub(r"(?<![\w'])[Aa](?=\s+\w)", "'n", said)
+        parts.append(Part(lg, chosen[0].start, chosen[-1].end, said, chosen))
+    return parts
 
 
 def _decode(model, audio, language, verbatim, hot, offset=0.0):
@@ -316,70 +413,47 @@ def _clip_language(model, audio) -> dict:
     return {token[2:-2]: float(prob) for token, prob in results}
 
 
-def _speech_groups_of(audio) -> List[tuple]:
-    from faster_whisper.vad import VadOptions, get_speech_timestamps
-
-    sr = 16000
-    chunks = get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=500, speech_pad_ms=150))
-    return speech_groups([(c["start"] / sr, c["end"] / sr) for c in chunks])
-
-
-def _split_runs(model, audio, groups: List[tuple]) -> List[tuple]:
-    sr = 16000
-    langs: List[Optional[str]] = []
-    for a, b in groups:
-        if b - a < MIN_DETECT_S:
-            langs.append(None)
-            continue
-        _lang, _p, probs = model.detect_language(audio[int(a * sr):int(b * sr)])
-        langs.append(pick_language(dict(probs)))
-    return language_runs(groups, langs)
-
-
 def transcribe(path: str, *, verbatim: bool = True, model_name: str = DEFAULT_MODEL,
                language: Optional[str] = None, extra_hotwords: str = "",
                offline: bool = False, spoken_numbers: bool = True) -> Transcript:
     """Transcribe one clip. `language=None` lets Whisper detect it; SPLIT
-    checks each stretch for English or Afrikaans and fills `parts`.
-    `spoken_numbers` writes "24" as "twenty-four" (English only)."""
+    writes each sentence in English or Afrikaans, whichever it is spoken in,
+    and fills `parts`. `spoken_numbers` writes "24" as "twenty-four" (English only)."""
     hot = " ".join(x for x in (SA_HOTWORDS, extra_hotwords) if x).strip()
     audio = load_16k(path)
     sr = 16000
     with _LOCK:
         model = _get_model(model_name, offline)
-        runs, detected = [], None
+        detected = None
+        both = False
         try:
             if language == SPLIT:
-                groups = _speech_groups_of(audio)
-                if len(groups) > 1:
-                    runs = _split_runs(model, audio, groups)
-                else:       # one stretch: one check, shared with the transcription
-                    language = pick_language(_clip_language(model, audio))
+                probs = _clip_language(model, audio)
+                both = probs.get("af", 0.0) >= AF_POSSIBLE or len(audio) / sr > LANGUAGE_WINDOW_S
+                language = "en"
             elif language is None:
                 probs = _clip_language(model, audio)
                 language = max(probs, key=probs.get)
                 detected = probs[language]
         except Exception as e:  # noqa: BLE001 -- a failed check must not lose the transcript
             print(f"language check: {type(e).__name__}: {e}", file=sys.stderr)
-            runs, language = [], ("en" if language == SPLIT else language)
-        if len({r[0] for r in runs}) > 1:
-            parts, words = [], []
-            for lg, a, b in runs:
-                lo, hi = max(0, int((a - 0.1) * sr)), min(len(audio), int((b + 0.1) * sr))
-                text, w, _info = _decode(model, audio[lo:hi], lg, verbatim, hot, lo / sr)
-                parts.append(Part(lg, a, b, text))
-                words += w
-            duration = len(audio) / sr
-            spoken: dict = {}
-            for p in parts:
-                spoken[p.language] = spoken.get(p.language, 0.0) + p.end - p.start
-            lang, prob = max(spoken, key=spoken.get), 1.0
-        else:
-            one = runs[0][0] if runs else ("en" if language == SPLIT else language)
-            text, words, info = _decode(model, audio, one, verbatim, hot)
-            parts = [Part(info.language, 0.0, float(info.duration), text)]
-            duration, lang = float(info.duration), info.language
-            prob = float(info.language_probability) if detected is None else detected
+            language = "en" if language == SPLIT else language
+        text, words, info = _decode(model, audio, language, verbatim, hot)
+        duration, lang = float(info.duration), info.language
+        prob = float(info.language_probability) if detected is None else detected
+        parts = [Part(lang, 0.0, duration, text, words)]
+        if both:
+            # Same audio again as Afrikaans (no English hotwords): the encoder
+            # pass is shared, so this costs one more decode.
+            _af_text, af_words, _info = _decode(model, audio, "af", verbatim, extra_hotwords)
+            split = split_by_sentence(af_words, words)
+            if len({p.language for p in split}) > 1 or (split and split[0].language == "af"):
+                parts = split
+                words = [w for p in parts for w in p.words]
+                spoken: dict = {}
+                for p in parts:
+                    spoken[p.language] = spoken.get(p.language, 0.0) + p.end - p.start
+                lang, prob = max(spoken, key=spoken.get), 1.0
         model.encode.forget()
     if spoken_numbers:
         import textprep

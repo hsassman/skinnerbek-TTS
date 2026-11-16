@@ -91,23 +91,51 @@ def test_offline_without_model_says_how_to_fix(tmp_path, monkeypatch):
         raise AssertionError("expected TranscriberUnavailable")
 
 
-def test_afrikaans_only_when_clear_cut():
-    # Cape Town English often scores about half Afrikaans (seen on a real clip: af 0.54).
-    assert asr.pick_language({"en": 0.19, "af": 0.54}) == "en"
-    assert asr.pick_language({"en": 0.05, "af": 0.90}) == "af"
-    assert asr.pick_language({"es": 0.95, "en": 0.04}) == "en"
+def _words(text, start, prob=0.9, step=0.4):
+    return [Word(w, start + i * step, start + i * step + 0.3, prob)
+            for i, w in enumerate(text.split())]
 
 
-def test_speech_groups_join_close_stretches_only():
-    groups = asr.speech_groups([(0.0, 3.0), (3.4, 5.0), (7.0, 9.0), (9.5, 22.0)])
-    assert groups == [(0.0, 5.0), (7.0, 9.0), (9.5, 22.0)]   # 9.5-22 would pass JOIN_MAX_S
+def test_small_words_tell_the_languages_apart():
+    assert asr.text_language("Dis nie net klank nie.") == "af"
+    assert asr.text_language("A stem wat duidelikheid, emosie en intensie dra.") == "af"
+    assert asr.text_language("There's a person who knows how to make it count.") == "en"
+    assert asr.text_language("\u2019n Lekker dag in Kaapstad") == "af"
+    assert asr.text_language("Lekker!") is None
 
 
-def test_language_runs_fill_short_groups_and_merge():
-    groups = [(0, 3), (3.5, 4), (6, 9), (10, 12), (13, 13.5)]
-    runs = asr.language_runs(groups, ["en", None, "af", "af", None])
-    assert runs == [("en", 0, 4), ("af", 6, 13.5)]
-    assert asr.language_runs([(0, 1)], [None]) == [("en", 0, 1)]
+def test_sentences_end_at_marks_and_long_pauses():
+    words = _words("Be bold. Be loud", 0.0) + _words("and free.", 5.0)
+    assert [" ".join(w.text for w in s) for s in asr.sentences(words)] == [
+        "Be bold.", "Be loud", "and free."]
+
+
+def test_a_switch_with_no_pause_is_split_at_the_sentence():
+    # The real failure: English runs straight into Afrikaans. The Afrikaans pass
+    # writes both correctly; the English pass writes gibberish for the Afrikaans.
+    english = "There's a person who knows how to make it count."
+    af_pass = _words(english, 0.0) + _words("A stem wat duidelikheid en intensie dra.", 4.0) \
+        + _words("Dis nie net klank nie.", 6.8)
+    en_pass = _words(english, 0.0) + _words("A stem wat dajlikajt im wysi draa.", 4.0, prob=0.3) \
+        + _words("Dis ni net klankni.", 6.8, prob=0.3)
+    parts = asr.split_by_sentence(af_pass, en_pass)
+    assert [(p.language, p.text) for p in parts] == [
+        ("en", english),
+        ("af", "'n stem wat duidelikheid en intensie dra. Dis nie net klank nie.")]
+    assert parts[0].end <= parts[1].start
+
+
+def test_an_all_english_clip_stays_one_english_part():
+    said = "Be bold. Be loud. Be inspired."
+    parts = asr.split_by_sentence(_words(said, 0.0), _words(said, 0.0))
+    assert [(p.language, p.text) for p in parts] == [("en", said)]
+
+
+def test_afrikaans_words_for_english_speech_are_not_believed():
+    # The Afrikaans pass translated, while the English pass heard plain English clearly.
+    af_pass = _words("Dit is die beste dag van my lewe.", 0.0, prob=0.5)
+    en_pass = _words("This is the best day of my life.", 0.0, prob=0.95)
+    assert [p.language for p in asr.split_by_sentence(af_pass, en_pass)] == ["en"]
 
 
 def test_same_audio_is_encoded_once():
@@ -122,6 +150,6 @@ def test_same_audio_is_encoded_once():
     asr._remember_last_encode(m)
     a, b = np.ones((80, 3000), np.float32), np.zeros((80, 3000), np.float32)
     assert m.encode(a) == 1 and m.encode(a.copy()) == 1      # the repeat is free
-    assert m.encode(b) == 2 and m.encode(a) == 3             # only the latest is kept
+    assert m.encode(b) == 2 and m.encode(a) == 1             # a few windows are kept
     m.encode.forget()
-    assert m.encode(a) == 4
+    assert m.encode(a) == 3

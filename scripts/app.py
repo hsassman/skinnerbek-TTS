@@ -1914,9 +1914,9 @@ def build_app() -> gr.Blocks:
                                 a_lang = gr.Dropdown(
                                     list(ASR_LANGUAGE), value="English and Afrikaans",
                                     label="Language spoken in the clip",
-                                    info="English and Afrikaans writes each part in the language "
-                                         "it is spoken in. English is quicker for a clip with long "
-                                         "pauses and no Afrikaans.")
+                                    info="English and Afrikaans writes each sentence in the "
+                                         "language it is spoken in. Pick one language if the clip "
+                                         "has only that one and comes out wrong.")
                                 a_redo = gr.Button("Transcribe again", variant="secondary", size="sm")
 
                         with gr.Column(elem_classes="tts-card", elem_id="tts-save-card"):
